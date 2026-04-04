@@ -1,11 +1,40 @@
 """
 Backtester — runs the full pipeline against 90 days of historical Polymarket data.
 
-Fixes vs previous version:
+Fixes vs previous version (Phase 1 — DONE):
 - Resolution is parsed from real outcomePrices (Gamma API), not inferred from final token price
 - Entry prices come from actual CLOB price history (prices-history endpoint)
 - Fake rng.uniform() edge is gone; simulation uses real price-at-entry vs real outcome
 - Metrics computed via vectorbt Portfolio.from_orders() with manual fallback
+
+PLANNED UPGRADES (do not implement until approved):
+
+Phase 2C — Local Polymarket Data (removes CLOB API rate limit cap)
+  Currently: capped at _MAX_HISTORY_FETCHES = 60 CLOB API calls per run.
+  Fix: If Config.POLYMARKET_DATA_PATH is set (local clone of Polymarket_data repo):
+    1. Load resolved markets from local CSV/Parquet files instead of Gamma API
+    2. Load price history from local files instead of CLOB prices-history endpoint
+    3. Remove the 60-market cap entirely — test on thousands of markets in seconds
+    4. Keep the existing CLOB-based path as fallback when POLYMARKET_DATA_PATH is empty
+
+  Data loading logic (pseudocode):
+    if Config.POLYMARKET_DATA_PATH:
+        markets = load_local_markets(Config.POLYMARKET_DATA_PATH)  # CSV/Parquet
+        # Each row has: condition_id, question, outcomePrices, endDate, category
+    else:
+        markets = _fetch_resolved_markets()  # existing Gamma API call
+
+  Price history loading:
+    if Config.POLYMARKET_DATA_PATH:
+        history = load_local_price_history(condition_id, Config.POLYMARKET_DATA_PATH)
+    else:
+        history = _fetch_clob_history(condition_id)  # existing CLOB API call
+
+Phase 4 — Evaluator Integration
+  After run_backtest() completes, write each simulated trade to logs/evaluation_log.jsonl
+  using the same schema that executor.py uses for live trades.
+  This seeds the evaluator with historical calibration data before any live trades occur.
+  Call: evaluator.record_resolved_trade(trade_record) for each simulated trade.
 """
 
 import json

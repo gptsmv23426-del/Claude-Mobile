@@ -1,6 +1,46 @@
 """
 Executor — places trades in paper or live mode.
 Mode is read once at startup and never changes mid-session.
+
+PLANNED UPGRADES (do not implement until approved):
+
+Phase 4 — Real Outcome Resolution (CRITICAL prerequisite for evaluation)
+  Problem: _close_position() currently uses exit_price = entry_price (neutral/wrong).
+  The bot cannot compute real P&L or Brier scores without knowing the actual outcome.
+
+  Fix for _close_position():
+    When close_reason == "time_exit_4h_before_expiry":
+      1. Call Gamma API: GET https://gamma-api.polymarket.com/markets/{condition_id}
+      2. Parse outcomePrices field (same logic as backtester._parse_resolution())
+      3. resolved_yes = True if yes_final > 0.9, False if yes_final < 0.1, None if ambiguous
+      4. If resolved_yes is not None:
+           Compute binary P&L:
+             if pos["side"] == "YES" and resolved_yes:
+                 pnl = size_usdc * (1.0 / entry_price - 1.0)   # correct YES bet
+             elif pos["side"] == "YES" and not resolved_yes:
+                 pnl = -size_usdc                                # wrong YES bet
+             elif pos["side"] == "NO" and not resolved_yes:
+                 pnl = size_usdc * (1.0 / entry_price - 1.0)   # correct NO bet
+             elif pos["side"] == "NO" and resolved_yes:
+                 pnl = -size_usdc                                # wrong NO bet
+         else:
+             pnl = 0.0  # market not yet resolved — check again next cycle
+      5. Add to trade record: actual_outcome=resolved_yes, predicted_prob=pos["probability"]
+      6. Only close the position if resolved_yes is not None. Otherwise leave open for next scan.
+
+  Fix for _build_trade_record():
+    Add fields to every trade record for evaluation:
+      "predicted_probability": f.probability,   # already there as "probability"
+      "actual_outcome": None,                    # filled in by _close_position()
+      "brier_contribution": None,                # filled in by evaluator.py
+      "cross_ref_metaculus": None,               # filled in if Phase 2A is active
+      "cross_ref_manifold": None,                # filled in if Phase 2A is active
+
+Phase 4 — Evaluation Log Write
+  After _close_position() computes real P&L and actual_outcome:
+    from evaluator import record_resolved_trade
+    record_resolved_trade(trade_record)
+  This writes one line to logs/evaluation_log.jsonl for the weekly Sonnet review.
 """
 
 import json

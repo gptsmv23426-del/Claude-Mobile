@@ -1,5 +1,48 @@
 """
 Monitor — Telegram alerts using python-telegram-bot (sync version).
+
+PLANNED UPGRADES (do not implement until approved):
+
+Phase 4 — Weekly Calibration Report Alert
+  Add alert_calibration_report() function:
+    def alert_calibration_report(
+        brier_score: float,
+        win_rate: float,
+        n_trades: int,
+        worst_category: str,
+        best_category: str,
+        top_lesson: str,
+        threshold_changes: dict,
+    ) -> None:
+    Message format:
+      <b>WEEKLY CALIBRATION REPORT</b>
+      Trades evaluated: {n_trades}
+      Brier Score: {brier_score:.3f} (target <0.20)
+      Win Rate: {win_rate:.1%}
+      Best category: {best_category}
+      Worst category: {worst_category}
+      Sonnet lesson: {top_lesson}
+      Threshold changes: {threshold_changes}
+
+  Called from main.py on Config.WEEKLY_EVAL_DAY at the same 14:00 UTC schedule slot.
+
+Phase 4 — Outcome Resolution Alert
+  Add alert_trade_resolved() to replace alert_trade_exit() with richer data:
+    def alert_trade_resolved(
+        question: str,
+        side: str,
+        pnl: float,
+        predicted_prob: float,
+        actual_outcome: bool,
+        brier_contribution: float,
+    ) -> None:
+    Message format:
+      <b>TRADE RESOLVED</b>
+      Market: {question}
+      Side: {side} | Outcome: {"YES" if actual_outcome else "NO"}
+      Result: {"WIN" if pnl > 0 else "LOSS"} ${pnl:+.2f}
+      Predicted: {predicted_prob:.1%} | Actual: {"1.0" if actual_outcome else "0.0"}
+      Brier: {brier_contribution:.3f}
 """
 
 import logging

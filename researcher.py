@@ -1,5 +1,38 @@
 """
 Researcher — uses claude-haiku-4-5 with web search to gather evidence for each market.
+
+PLANNED UPGRADES (do not implement until approved):
+
+Phase 2A — Cross-Reference Integration (zero new deps)
+  Before calling Claude, query signals/cross_reference.py for each market:
+    result = cross_reference_market(market.question)
+    # result.metaculus_prob: float | None  (Metaculus crowd median)
+    # result.manifold_prob:  float | None  (Manifold binary market price)
+    # result.agreement_score: float        (how much sources agree, 0-1)
+  Inject into user_prompt as an additional context block:
+    "External forecast signals:
+     - Metaculus crowd: {result.metaculus_prob:.1%} YES
+     - Manifold Markets: {result.manifold_prob:.1%} YES
+     - Agreement score: {result.agreement_score:.2f}"
+  If no match found, omit the block silently.
+
+Phase 2B — FRED Macro Context (requires: pip install fredapi + FRED_API_KEY in .env)
+  At the top of research_market(), check:
+    if market.category == "MACRO" and Config.ENABLE_MACRO_CONTEXT:
+        macro = get_macro_snapshot()  # from signals/macro_context.py
+  Inject macro snapshot into system_prompt for MACRO markets:
+    "Current macro environment: Fed Funds={macro.fed_funds}%, CPI={macro.cpi}%,
+     Unemployment={macro.unemployment}%, S&P500={macro.sp500}, 10Y={macro.yield_10y}%"
+  Cache the snapshot for 24h — do not fetch FRED on every market scan.
+
+Phase 4 — Calibration Feedback
+  Import and read the latest calibration report from evaluator.py:
+    from evaluator import get_calibration_summary
+    cal = get_calibration_summary()
+  Inject into system_prompt:
+    "Recent bot calibration: Brier={cal.brier_score:.3f}, Win rate={cal.win_rate:.1%}.
+     Overconfident in {cal.worst_category}. Apply extra skepticism there."
+  This closes the feedback loop: past performance influences future research framing.
 """
 
 import logging
