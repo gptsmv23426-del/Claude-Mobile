@@ -108,6 +108,20 @@ def _apply_calibration_penalty(probability: float, evidence_quality: float) -> f
     return probability * (1 - shrinkage) + 0.5 * shrinkage
 
 
+def _select_model(volume_usd: float) -> str:
+    """
+    Use Sonnet for high-volume markets, Haiku for the rest.
+    Economics: extra Sonnet cost ~$0.003/call vs minimum trade win ~$13 — ratio ~4500x.
+    Sonnet is justified on any market large enough to trade.
+    """
+    if volume_usd >= Config.SONNET_VOLUME_THRESHOLD_USD:
+        model = "claude-sonnet-4-6"
+    else:
+        model = "claude-haiku-4-5-20251001"
+    logger.debug("Forecast model selected: %s (volume=$%.0f, threshold=$%.0f)", model, volume_usd, Config.SONNET_VOLUME_THRESHOLD_USD)
+    return model
+
+
 def forecast_market(research: ResearchResult) -> ForecastResult | None:
     """
     Produce a probability forecast for a single market.
@@ -132,8 +146,9 @@ Based on this evidence, what is the true probability that the YES outcome occurs
 Remember: output ONLY a JSON object, no other text."""
 
     try:
+        model = _select_model(research.volume_usd)
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=model,
             max_tokens=256,
             system=FORECASTER_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
@@ -177,12 +192,13 @@ Remember: output ONLY a JSON object, no other text."""
             side = "NO"
 
         logger.info(
-            "Forecast for '%s': prob=%.3f conf=%s edge=%.3f side=%s",
+            "Forecast for '%s': prob=%.3f conf=%s edge=%.3f side=%s [model=%s]",
             research.question[:50],
             probability,
             confidence,
             edge,
             side,
+            model,
         )
 
         return ForecastResult(

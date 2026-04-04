@@ -40,6 +40,11 @@ class Config:
     KELLY_FRACTION: float = float(os.environ.get("KELLY_FRACTION", "0.25"))
     MIN_BACKTEST_SHARPE: float = float(os.environ.get("MIN_BACKTEST_SHARPE", "0.8"))
 
+    # Markets above this volume threshold use claude-sonnet-4-6 for forecasting.
+    # Economics: extra Sonnet cost ~$0.003/call vs minimum trade win ~$13. Ratio: ~4500x.
+    # Below threshold: claude-haiku-4-5-20251001 (sufficient for smaller, less critical markets).
+    SONNET_VOLUME_THRESHOLD_USD: float = float(os.environ.get("SONNET_VOLUME_THRESHOLD_USD", "50000"))
+
     PREFERRED_CATEGORIES = {"CRYPTO", "MACRO", "TECHNOLOGY", "SCIENCE", "POLITICS"}
     SKIP_CATEGORIES = {"WEATHER", "SPORTS"}
 
