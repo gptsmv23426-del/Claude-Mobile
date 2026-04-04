@@ -40,13 +40,18 @@ def _load_portfolio() -> dict:
     }
 
 
-def _kelly_position_size(edge: float, worst_case_price: float, portfolio_balance: float) -> float:
+def _kelly_position_size(edge: float, entry_price: float, portfolio_balance: float) -> float:
     """
-    Fractional Kelly sizing.
-    kelly_fraction = edge / (1 - worst_case_price)
-    position_size = balance * kelly_fraction * KELLY_FRACTION config
+    Fractional Kelly sizing for a binary prediction market.
+
+    Standard Kelly: f* = edge / (1 - entry_price)
+    where edge = forecast_probability - market_price (already computed by forecaster).
+
+    Using the entry_price (what you pay per share) in the denominator is correct.
+    Using the opposite side's price was wrong: it diverges from entry_price whenever
+    the spread is non-zero, systematically over-sizing YES bets and under-sizing NO bets.
     """
-    denominator = 1.0 - worst_case_price
+    denominator = 1.0 - entry_price
     if denominator <= 0:
         return 0.0
     kelly = edge / denominator
@@ -88,8 +93,8 @@ def evaluate_trade(forecast: ForecastResult) -> RiskDecision:
     logger.debug("Check 3 PASS: evidence_quality=%.2f", forecast.evidence_quality)
 
     # Check 4: Position size must be <= MAX_POSITION_SIZE_USDC
-    worst_case = forecast.no_price if forecast.side == "YES" else forecast.yes_price
-    raw_size = _kelly_position_size(forecast.edge, worst_case, balance)
+    entry_price = forecast.yes_price if forecast.side == "YES" else forecast.no_price
+    raw_size = _kelly_position_size(forecast.edge, entry_price, balance)
     if raw_size <= 0:
         return block("Kelly sizing produced zero position size")
     logger.debug("Check 4 PASS: kelly_size=%.2f USDC", raw_size)

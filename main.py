@@ -136,9 +136,12 @@ def main() -> None:
     summary = get_portfolio_summary()
     alert_startup(paper_trading=IS_PAPER_TRADING, balance=summary["balance"])
 
-    # Step 4: Schedule daily summary at 8:00 AM CT (UTC-5 / UTC-6 depending on DST)
-    # 8:00 AM CT ≈ 14:00 UTC
-    schedule.every().day.at("14:00").do(_send_daily_summary)
+    # Step 4: Schedule daily summary.
+    # DAILY_SUMMARY_TIME_UTC is read from .env (default "14:00" ≈ 8 AM CT).
+    # The `schedule` library uses the server's local clock, so deploy in UTC
+    # or set DAILY_SUMMARY_TIME_UTC to match your server timezone offset.
+    summary_time = os.environ.get("DAILY_SUMMARY_TIME_UTC", "14:00")
+    schedule.every().day.at(summary_time).do(_send_daily_summary)
 
     logger.info(
         "Bot running | Mode: %s | Scan interval: %d min",
@@ -149,15 +152,18 @@ def main() -> None:
     # Step 5: Main loop
     _run_trading_cycle()  # Run once immediately on startup
 
+    next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
+
     while True:
         try:
+            # Tick the scheduler every 30 seconds so scheduled jobs fire on time
+            # regardless of how long the trading cycle took.
             schedule.run_pending()
+            time.sleep(30)
 
-            # Wait for next scan interval
-            time.sleep(Config.SCAN_INTERVAL_MINUTES * 60)
-
-            # Run trading cycle
-            _run_trading_cycle()
+            if time.time() >= next_cycle_time:
+                _run_trading_cycle()
+                next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
         except KeyboardInterrupt:
             logger.info("Shutdown requested via keyboard interrupt.")
@@ -171,6 +177,7 @@ def main() -> None:
                 pass  # Don't let Telegram failure cascade
             logger.info("Sleeping 5 minutes before retry...")
             time.sleep(300)
+            next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
 
 if __name__ == "__main__":

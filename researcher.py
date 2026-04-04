@@ -126,8 +126,11 @@ KEY_FACTS:
                 key_facts.append(line[2:].strip())
 
         if not summary:
-            # fallback: use whole text as summary
-            summary = text[:500]
+            logger.warning(
+                "No SUMMARY line in research response for market %s — discarding result.",
+                market.market_id,
+            )
+            return None
 
         if evidence_quality < Config.MIN_EVIDENCE_QUALITY:
             logger.info(

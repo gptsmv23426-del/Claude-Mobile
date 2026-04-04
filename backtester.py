@@ -86,10 +86,13 @@ def _simulate_trades(markets: list[dict]) -> pd.DataFrame:
             if volume < Config.MIN_MARKET_VOLUME_USD:
                 continue
 
-            # Determine trade outcome
-            # Markets that resolved YES have yes_price → 1.0 at resolution
-            # We infer resolution from whether the final price went toward 1 or 0
-            resolved_yes = yes_price > 0.5  # heuristic from final price
+            # Determine trade outcome.
+            # NOTE: For binary markets the Gamma API returns the final settlement price
+            # (0 or 1) in the token price field once resolved.  The filter above
+            # (yes_price <= 0.05 or yes_price >= 0.95) removes clean resolutions, so
+            # the remaining markets are mid-resolution or ambiguous.  The 0.5 threshold
+            # is a rough heuristic; it may misclassify ~10-20% of outcomes.
+            resolved_yes = yes_price > 0.5
 
             side = "YES" if forecast_prob > yes_price else "NO"
             entry_price = yes_price if side == "YES" else (1 - yes_price)
@@ -139,7 +142,10 @@ def _calculate_metrics(df: pd.DataFrame, initial_balance: float = 1000.0) -> dic
     equity_series = pd.Series(equity)
     returns = equity_series.pct_change().dropna()
 
-    sharpe = (returns.mean() / returns.std() * np.sqrt(252)) if returns.std() > 0 else 0.0
+    # Sharpe is computed per-trade (not annualised) because the series is trade-indexed,
+    # not date-indexed. Multiplying by sqrt(252) would assume one trade per calendar day,
+    # which is wrong and would inflate the metric by 5-15x.
+    sharpe = (returns.mean() / returns.std()) if returns.std() > 0 else 0.0
 
     peak = equity_series.expanding().max()
     drawdown = (equity_series - peak) / peak
@@ -215,12 +221,34 @@ def run_backtest() -> dict:
     else:
         logger.info("Backtest passed Sharpe threshold: %.3f >= %.3f", sharpe, Config.MIN_BACKTEST_SHARPE)
 
-    # Mark backtest as done
+    # Mark backtest as done, recording the config fingerprint so a config change
+    # triggers a fresh backtest on next startup.
     with open(BACKTEST_DONE_FLAG, "w") as f:
-        f.write(datetime.now().isoformat())
+        f.write(f"{datetime.now().isoformat()}|{_config_fingerprint()}")
 
     return metrics
 
 
+def _config_fingerprint() -> str:
+    """Return a short hash of the config values that affect backtest results."""
+    import hashlib
+    sig = (
+        f"{Config.MIN_EDGE_THRESHOLD}|{Config.MIN_MARKET_VOLUME_USD}|"
+        f"{Config.KELLY_FRACTION}|{Config.MAX_POSITION_SIZE_USDC}|"
+        f"{Config.MAX_SPREAD}"
+    )
+    return hashlib.md5(sig.encode()).hexdigest()[:8]
+
+
 def backtest_already_run() -> bool:
-    return os.path.exists(BACKTEST_DONE_FLAG)
+    if not os.path.exists(BACKTEST_DONE_FLAG):
+        return False
+    try:
+        stored = open(BACKTEST_DONE_FLAG).read().strip()
+        # Flag format: "<iso_timestamp>|<config_fingerprint>"
+        if "|" not in stored:
+            return False  # old format — re-run
+        _, stored_fp = stored.rsplit("|", 1)
+        return stored_fp == _config_fingerprint()
+    except Exception:
+        return False

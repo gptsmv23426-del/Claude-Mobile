@@ -6,7 +6,7 @@ Mode is read once at startup and never changes mid-session.
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from config import Config
 from forecaster import ForecastResult
@@ -27,8 +27,16 @@ def _load_portfolio() -> dict:
         try:
             with open(PAPER_PORTFOLIO_FILE) as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(
+                "Portfolio file corrupted or unreadable (%s) — refusing to reset silently. "
+                "Inspect %s before continuing.",
+                exc,
+                PAPER_PORTFOLIO_FILE,
+            )
+            raise RuntimeError(
+                f"Portfolio file unreadable: {exc}. Fix or delete {PAPER_PORTFOLIO_FILE} manually."
+            ) from exc
     return {
         "balance": 1000.0,
         "peak_balance": 1000.0,
@@ -113,8 +121,9 @@ def _execute_paper(decision: RiskDecision, f: ForecastResult) -> bool:
     portfolio = _load_portfolio()
 
     entry_price = f.yes_price if f.side == "YES" else f.no_price
-    shares = decision.position_size_usdc / entry_price if entry_price > 0 else 0
+    shares = round(decision.position_size_usdc / entry_price, 4) if entry_price > 0 else 0.0
 
+    now = datetime.now(timezone.utc)
     portfolio["balance"] -= decision.position_size_usdc
 
     position = {
@@ -124,17 +133,13 @@ def _execute_paper(decision: RiskDecision, f: ForecastResult) -> bool:
         "size_usdc": decision.position_size_usdc,
         "shares": shares,
         "entry_price": entry_price,
-        "entry_time": datetime.now(timezone.utc).isoformat(),
-        "days_to_expiry_at_entry": f.days_to_expiry,
+        "entry_time": now.isoformat(),
+        "expiry_time": (now + timedelta(days=f.days_to_expiry)).isoformat(),
         "stop_loss_price": entry_price * 0.70,  # 30% stop loss
         "condition_id": f.condition_id,
         "token_ids": f.token_ids,
     }
     portfolio["open_positions"][f.market_id] = position
-
-    # Update peak balance tracking
-    if portfolio["balance"] > portfolio.get("peak_balance", 0):
-        portfolio["peak_balance"] = portfolio["balance"]
 
     _save_portfolio(portfolio)
 
@@ -163,14 +168,22 @@ def _execute_live(decision: RiskDecision, f: ForecastResult) -> bool:
             signature_type=2,  # EIP-712
         )
 
+        if not f.token_ids or len(f.token_ids) < 2:
+            logger.error(
+                "[LIVE] Market %s has incomplete token_ids (%s) — aborting order.",
+                f.market_id,
+                f.token_ids,
+            )
+            return False
+
         if f.side == "YES":
-            token_id = f.token_ids[0] if f.token_ids else ""
+            token_id = f.token_ids[0]
             price = f.yes_price
         else:
-            token_id = f.token_ids[1] if len(f.token_ids) > 1 else ""
+            token_id = f.token_ids[1]
             price = f.no_price
 
-        size = round(decision.position_size_usdc / price, 2) if price > 0 else 0
+        size = round(decision.position_size_usdc / price, 4) if price > 0 else 0
 
         order_args = OrderArgs(
             token_id=token_id,
@@ -199,6 +212,8 @@ def _execute_live(decision: RiskDecision, f: ForecastResult) -> bool:
         }
         portfolio["open_positions"][f.market_id] = position
         portfolio["balance"] -= decision.position_size_usdc
+        if portfolio["balance"] > portfolio.get("peak_balance", 0):
+            portfolio["peak_balance"] = portfolio["balance"]
         _save_portfolio(portfolio)
 
         return True
@@ -222,24 +237,26 @@ def monitor_open_positions() -> list[dict]:
             close_reason = None
 
             # Time-based exit: close positions 4 hours before expiry
-            entry_time = datetime.fromisoformat(pos["entry_time"])
-            days_at_entry = pos.get("days_to_expiry_at_entry", 999)
             now = datetime.now(timezone.utc)
-            elapsed_days = (now - entry_time.replace(tzinfo=timezone.utc)).total_seconds() / 86400
-            remaining_days = days_at_entry - elapsed_days
-
-            if remaining_days < (4 / 24):
-                close_reason = "time_exit_4h_before_expiry"
+            expiry_str = pos.get("expiry_time") or ""
+            if expiry_str:
+                expiry_dt = datetime.fromisoformat(expiry_str)
+                if expiry_dt.tzinfo is None:
+                    expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+                remaining_seconds = (expiry_dt - now).total_seconds()
+                if remaining_seconds < 4 * 3600:
+                    close_reason = "time_exit_4h_before_expiry"
 
             # For paper trading, we can't check live price easily — rely on expiry
             # In live mode: check current price vs stop-loss
+            live_price: float | None = None
             if not IS_PAPER_TRADING and close_reason is None:
-                current_price = _get_current_price(pos)
-                if current_price is not None and current_price < pos.get("stop_loss_price", 0):
-                    close_reason = f"stop_loss_triggered (price={current_price:.3f})"
+                live_price = _get_current_price(pos)
+                if live_price is not None and live_price < pos.get("stop_loss_price", 0):
+                    close_reason = f"stop_loss_triggered (price={live_price:.3f})"
 
             if close_reason:
-                pnl = _close_position(portfolio, market_id, pos, close_reason)
+                pnl = _close_position(portfolio, market_id, pos, close_reason, exit_price=live_price)
                 closed.append({"market_id": market_id, "question": pos["question"], "pnl": pnl, "reason": close_reason})
                 logger.info("Closed position %s: reason=%s pnl=%.2f", market_id, close_reason, pnl)
 
@@ -256,28 +273,48 @@ def _get_current_price(pos: dict) -> float | None:
     """Fetch current market price for a live position."""
     try:
         import requests
-        token_id = pos.get("token_ids", [None])[0] if pos.get("side") == "YES" else pos.get("token_ids", [None, None])[1]
+        token_ids = pos.get("token_ids") or []
+        side = pos.get("side")
+        if side == "YES":
+            token_id = token_ids[0] if len(token_ids) >= 1 else None
+        else:
+            token_id = token_ids[1] if len(token_ids) >= 2 else None
         if not token_id:
+            logger.warning("Cannot fetch price for position %s: missing token_id", pos.get("market_id"))
             return None
         resp = requests.get(
-            f"https://clob.polymarket.com/price",
+            "https://clob.polymarket.com/price",
             params={"token_id": token_id, "side": "buy"},
             timeout=10,
         )
-        return float(resp.json().get("price", 0))
-    except Exception:
+        resp.raise_for_status()
+        price = float(resp.json().get("price", 0))
+        return price if price > 0 else None
+    except Exception as exc:
+        logger.warning("Price fetch failed for %s: %s", pos.get("market_id"), exc)
         return None
 
 
-def _close_position(portfolio: dict, market_id: str, pos: dict, reason: str) -> float:
-    """Remove position from portfolio and calculate P&L."""
+def _close_position(portfolio: dict, market_id: str, pos: dict, reason: str, exit_price: float | None = None) -> float:
+    """Remove position from portfolio and calculate P&L.
+
+    exit_price should be passed in for live mode (fetched from CLOB API).
+    For paper mode, time-exits assume 0 (full loss) since we cannot know the outcome;
+    stop-loss exits use the stop-loss price.
+    """
     entry_price = pos.get("entry_price", 0)
     shares = pos.get("shares", 0)
     size_usdc = pos.get("size_usdc", 0)
 
-    # For paper mode, assume we exit at current market-implied price (simplified)
-    # A real exit would fetch the current price and sell
-    exit_price = entry_price  # neutral assumption — actual outcome determines real P&L
+    if exit_price is None:
+        # Paper mode: conservative assumption — treat time-exits as full loss
+        # This keeps drawdown tracking honest; actual winners will be reflected
+        # only when real resolution data is available.
+        if "stop_loss" in reason:
+            exit_price = pos.get("stop_loss_price", 0.0)
+        else:
+            exit_price = 0.0  # worst case for unknown paper exits
+
     pnl = (exit_price - entry_price) * shares
 
     portfolio["balance"] = portfolio.get("balance", 0) + size_usdc + pnl

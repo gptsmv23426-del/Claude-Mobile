@@ -4,6 +4,7 @@ Forecaster — uses claude-haiku-4-5 to produce calibrated probability estimates
 
 import json
 import logging
+import re
 from typing import Literal
 
 import anthropic
@@ -97,12 +98,10 @@ Remember: output ONLY a JSON object, no other text."""
                 text += block.text
         text = text.strip()
 
-        # Strip markdown fences if present
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        text = text.strip().rstrip("```").strip()
+        # Strip markdown fences if present (e.g. ```json ... ``` or ``` ... ```)
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```\s*$", "", text)
+        text = text.strip()
 
         data = json.loads(text)
         raw_prob = float(data["probability"])

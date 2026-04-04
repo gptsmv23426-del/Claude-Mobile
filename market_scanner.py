@@ -103,8 +103,11 @@ def scan_markets() -> List[MarketOpportunity]:
                     no_price = price
 
             if yes_price is None or no_price is None:
-                yes_price = float(m.get("bestBid", 0) or 0)
-                no_price = round(1.0 - yes_price, 4)
+                logger.debug(
+                    "Skipping market %s: missing YES or NO token price in API response.",
+                    m.get("id", ""),
+                )
+                continue
 
             if yes_price <= 0 or yes_price >= 1:
                 continue
