@@ -52,6 +52,40 @@ def _send_daily_summary() -> None:
     )
 
 
+def _run_weekly_evaluation() -> None:
+    """
+    Run the weekly Sonnet strategy review and send calibration report to Telegram.
+    Scheduled to run on Config.WEEKLY_EVAL_DAY at 14:00 UTC.
+
+    PLANNED (Phase 4) — the evaluator functions called here raise NotImplementedError
+    until Phase 4 is implemented. This function is intentionally a no-op until then.
+    """
+    logger = logging.getLogger("main.weekly_eval")
+    logger.info("Weekly evaluation triggered.")
+    try:
+        # PLANNED (Phase 4): uncomment when evaluator is implemented
+        # from evaluator import run_weekly_review
+        # from monitor import alert_calibration_report
+        # learned = run_weekly_review()
+        # if learned:
+        #     alert_calibration_report(
+        #         brier_score=...,   # from CalibrationReport
+        #         win_rate=...,
+        #         n_trades=...,
+        #         worst_category=learned ... ,
+        #         best_category=...,
+        #         top_lesson=learned.sonnet_rationale,
+        #         threshold_changes={
+        #             "category_min_edge": learned.category_min_edge,
+        #             "category_skip": learned.category_skip,
+        #             "ensemble_recommended": learned.ensemble_recommended,
+        #         },
+        #     )
+        logger.info("Weekly evaluation is planned but not yet implemented (Phase 4).")
+    except Exception as exc:
+        logger.error("Weekly evaluation failed (non-fatal): %s", exc)
+
+
 def _run_trading_cycle() -> None:
     logger = logging.getLogger("main.cycle")
 
@@ -139,6 +173,11 @@ def main() -> None:
     # Step 4: Schedule daily summary at 8:00 AM CT (UTC-5 / UTC-6 depending on DST)
     # 8:00 AM CT ≈ 14:00 UTC
     schedule.every().day.at("14:00").do(_send_daily_summary)
+
+    # Step 4b: Schedule weekly Sonnet strategy review (Phase 4 — no-op until implemented)
+    # Runs on Config.WEEKLY_EVAL_DAY at 14:00 UTC, same window as daily summary.
+    _weekly_schedule = getattr(schedule.every(), Config.WEEKLY_EVAL_DAY, schedule.every().monday)
+    _weekly_schedule.at("14:00").do(_run_weekly_evaluation)
 
     logger.info(
         "Bot running | Mode: %s | Scan interval: %d min",
