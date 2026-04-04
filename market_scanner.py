@@ -9,12 +9,13 @@ from typing import List
 from pydantic import BaseModel
 
 from config import Config
+from monitor import alert_error
 
 logger = logging.getLogger(__name__)
 
-# Polymarket Gamma API base URL for market data
-GAMMA_API_BASE = "https://gamma-api.polymarket.com"
-CLOB_API_BASE = "https://clob.polymarket.com"
+from config import Config as _cfg
+GAMMA_API_BASE = _cfg.GAMMA_API_BASE
+CLOB_API_BASE = _cfg.CLOB_API_BASE
 
 
 class MarketOpportunity(BaseModel):
@@ -64,6 +65,7 @@ def scan_markets() -> List[MarketOpportunity]:
         markets = resp.json()
     except Exception as exc:
         logger.error("Failed to fetch markets from Gamma API: %s", exc)
+        alert_error("ScannerFailure", str(exc)[:200])
         return []
 
     if isinstance(markets, dict) and "data" in markets:
@@ -109,6 +111,12 @@ def scan_markets() -> List[MarketOpportunity]:
             if yes_price <= 0 or yes_price >= 1:
                 continue
 
+            # Skip markets without a condition_id — live orders and CLOB history would fail
+            condition_id = m.get("conditionId", "")
+            if not condition_id:
+                logger.debug("Skipping market with missing conditionId: %s", m.get("question", "")[:60])
+                continue
+
             spread = abs(1.0 - yes_price - no_price)
             if spread > Config.MAX_SPREAD:
                 continue
@@ -122,7 +130,7 @@ def scan_markets() -> List[MarketOpportunity]:
                 volume_usd=volume,
                 days_to_expiry=round(days_to_expiry, 2),
                 spread=round(spread, 4),
-                condition_id=m.get("conditionId", ""),
+                condition_id=condition_id,
                 token_ids=token_ids,
             )
             opportunities.append(opp)

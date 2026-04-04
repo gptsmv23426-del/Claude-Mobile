@@ -52,8 +52,9 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-GAMMA_API_BASE = "https://gamma-api.polymarket.com"
-CLOB_API_BASE = "https://clob.polymarket.com"
+from config import Config as _cfg
+GAMMA_API_BASE = _cfg.GAMMA_API_BASE
+CLOB_API_BASE = _cfg.CLOB_API_BASE
 BACKTEST_DONE_FLAG = "logs/backtest_done.flag"
 BACKTEST_REPORT_FILE = "logs/backtest_report.txt"
 HISTORICAL_TRADES_FILE = "logs/backtest_trades.csv"

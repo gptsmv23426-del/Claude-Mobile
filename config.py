@@ -43,6 +43,14 @@ class Config:
     PREFERRED_CATEGORIES = {"CRYPTO", "MACRO", "TECHNOLOGY", "SCIENCE", "POLITICS"}
     SKIP_CATEGORIES = {"WEATHER", "SPORTS"}
 
+    # API base URLs — single source of truth, imported by market_scanner and backtester
+    GAMMA_API_BASE: str = "https://gamma-api.polymarket.com"
+    CLOB_API_BASE: str = "https://clob.polymarket.com"
+
+    # Portfolio file paths — single source of truth, imported by executor and risk_manager
+    PAPER_PORTFOLIO_FILE: str = "logs/paper_portfolio.json"
+    TRADES_LOG_FILE: str = "logs/trades.jsonl"
+
     # -------------------------------------------------------------------------
     # PLANNED — Phase 2A: Cross-Reference Signals (zero new deps)
     # Add to .env when Phase 2A is implemented:

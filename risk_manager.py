@@ -15,7 +15,7 @@ from forecaster import ForecastResult
 
 logger = logging.getLogger(__name__)
 
-PAPER_PORTFOLIO_FILE = "logs/paper_portfolio.json"
+PAPER_PORTFOLIO_FILE = Config.PAPER_PORTFOLIO_FILE
 
 
 class RiskDecision(BaseModel):

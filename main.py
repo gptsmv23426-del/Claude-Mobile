@@ -188,15 +188,17 @@ def main() -> None:
     # Step 5: Main loop
     _run_trading_cycle()  # Run once immediately on startup
 
+    _last_scan = 0.0
+
     while True:
         try:
             schedule.run_pending()
 
-            # Wait for next scan interval
-            time.sleep(Config.SCAN_INTERVAL_MINUTES * 60)
+            if time.time() - _last_scan >= Config.SCAN_INTERVAL_MINUTES * 60:
+                _run_trading_cycle()
+                _last_scan = time.time()
 
-            # Run trading cycle
-            _run_trading_cycle()
+            time.sleep(60)  # tight loop — schedule fires within 60s of target time
 
         except KeyboardInterrupt:
             logger.info("Shutdown requested via keyboard interrupt.")
@@ -210,6 +212,7 @@ def main() -> None:
                 pass  # Don't let Telegram failure cascade
             logger.info("Sleeping 5 minutes before retry...")
             time.sleep(300)
+            _last_scan = time.time()  # don't immediately re-trigger scan after error recovery
 
 
 if __name__ == "__main__":

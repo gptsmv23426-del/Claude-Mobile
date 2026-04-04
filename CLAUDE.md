@@ -123,6 +123,42 @@ This must be fixed BEFORE evaluation is meaningful:
                            if NO  and resolved YES → loss  = -size
 - Store actual_outcome (True/False) alongside predicted_probability in every closed trade record
 
+## Pre-Launch Checklist — Things YOU Need to Do
+
+### API Keys & Credentials (all go in .env)
+- [ ] POLYMARKET_PRIVATE_KEY — your Polygon wallet private key (the wallet that holds USDC on Polygon)
+- [ ] POLYMARKET_FUNDER_ADDRESS — your Polymarket Safe/funder wallet address
+- [ ] POLYMARKET_API_KEY / SECRET / PASSPHRASE — generate at polymarket.com/settings
+- [ ] ANTHROPIC_API_KEY — from console.anthropic.com
+- [ ] TELEGRAM_BOT_TOKEN — create a bot via @BotFather on Telegram
+- [ ] TELEGRAM_CHAT_ID — your personal chat ID (send a message to @userinfobot)
+- [ ] FRED_API_KEY — free registration at fred.stlouisfed.org (needed for Phase 2B only)
+
+### Wallet & Funds Setup
+- [ ] Fund your Polygon wallet with USDC (bridge from Ethereum or buy directly on Polygon)
+- [ ] Approve USDC spending for the Polymarket CLOB contract on Polygon
+- [ ] Verify wallet shows balance on polymarket.com before running in live mode
+- [ ] Start with PAPER_TRADING=true and confirm Telegram alerts fire before going live
+
+### Software Installs (on main-PC)
+- [ ] pip install -r requirements.txt
+- [ ] Confirm vectorbt installs without error (it has C dependencies — may need build tools)
+- [ ] Test: python market_scanner.py — should print 5 sample markets
+- [ ] Test: python -c "from monitor import send_test_message; send_test_message()" — should receive Telegram message
+
+### Configuration Decisions Before Going Live
+- [ ] Set MAX_POSITION_SIZE_USDC — start at $10, not $25, until backtest validates
+- [ ] Set SCAN_INTERVAL_MINUTES — 60 is fine for paper; consider 30 for live
+- [ ] Set KELLY_FRACTION — default 0.25 is conservative; do not increase until 30+ live trades
+- [ ] Review MIN_EDGE_THRESHOLD=0.07 — may want to raise to 0.10 for first month
+- [ ] Clone Polymarket_data repo and set POLYMARKET_DATA_PATH for deeper backtesting (Phase 2C)
+
+### Docker (when running 24/7)
+- [ ] Copy .env.example to .env and fill in all values
+- [ ] docker-compose up -d
+- [ ] Confirm logs/bot_YYYYMMDD.log is being written
+- [ ] Confirm Telegram startup alert arrives
+
 ## .env Variables to Add (PLANNED)
 FRED_API_KEY=                    # Free at fred.stlouisfed.org — needed for Phase 2B
 POLYMARKET_DATA_PATH=            # Local path to cloned Polymarket_data repo — Phase 2C
