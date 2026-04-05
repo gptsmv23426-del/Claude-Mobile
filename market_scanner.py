@@ -4,11 +4,12 @@ Market scanner — connects to Polymarket CLOB API and returns filtered opportun
 
 import logging
 from datetime import datetime, timezone
-from typing import List
+from typing import Dict, List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import Config
+from cross_platform import get_cross_platform_prices
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,8 @@ class MarketOpportunity(BaseModel):
     spread: float
     condition_id: str = ""
     token_ids: List[str] = []
+    cross_platform_divergence: float = 0.0
+    cross_platform_prices: Dict[str, float] = Field(default_factory=dict)
 
 
 def _get_days_to_expiry(end_date_iso: str) -> float:
@@ -53,9 +56,9 @@ def scan_markets() -> List[MarketOpportunity]:
     params = {
         "active": "true",
         "closed": "false",
-        "limit": 200,
+        "limit": 500,
         "order": "volume24hr",
-        "ascending": "false",
+        "ascending": "true",
     }
 
     try:
@@ -135,7 +138,26 @@ def scan_markets() -> List[MarketOpportunity]:
             logger.warning("Skipping malformed market entry: %s", exc)
             continue
 
-    logger.info("Scanner found %d qualifying markets.", len(opportunities))
+    # Enrich each opportunity with cross-platform prices and compute divergence.
+    # This identifies markets where multiple independent platforms disagree —
+    # the strongest available edge signal that requires no proprietary data.
+    for opp in opportunities:
+        prices = get_cross_platform_prices(opp.question)
+        if prices:
+            opp.cross_platform_prices = prices
+            opp.cross_platform_divergence = round(
+                max(abs(opp.yes_price - p) for p in prices.values()), 4
+            )
+
+    # Sort by divergence descending: highest cross-platform disagreement first.
+    # Markets with zero divergence (no cross-platform match) sort to the bottom.
+    opportunities.sort(key=lambda o: o.cross_platform_divergence, reverse=True)
+
+    logger.info(
+        "Scanner found %d qualifying markets (%d with cross-platform data).",
+        len(opportunities),
+        sum(1 for o in opportunities if o.cross_platform_prices),
+    )
     return opportunities
 
 

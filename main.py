@@ -27,6 +27,7 @@ from monitor import (
     alert_drawdown_gate,
 )
 from backtester import run_backtest, backtest_already_run
+from calibration_tracker import log_forecast, check_and_update_resolutions
 
 
 def _configure_logging() -> None:
@@ -62,6 +63,15 @@ def _run_trading_cycle() -> None:
         alert_drawdown_gate(drawdown)
         return
 
+    # Poll for resolutions from previous cycles before scanning new ones.
+    # This keeps the calibration log up to date without a separate process.
+    try:
+        n_resolved = check_and_update_resolutions()
+        if n_resolved:
+            logger.info("Calibration: %d market(s) resolved since last cycle.", n_resolved)
+    except Exception as exc:
+        logger.warning("Calibration resolution check failed (non-fatal): %s", exc)
+
     logger.info("=== Starting trading cycle ===")
 
     # Step 1: Scan markets
@@ -93,6 +103,10 @@ def _run_trading_cycle() -> None:
         # Execute the trade
         trade_record = execute_trade(decision)
         if trade_record:
+            try:
+                log_forecast(forecast)
+            except Exception as exc:
+                logger.warning("Failed to log forecast to calibration tracker: %s", exc)
             alert_trade_entry(
                 question=forecast.question,
                 side=forecast.side,
