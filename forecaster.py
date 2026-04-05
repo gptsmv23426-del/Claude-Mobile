@@ -152,7 +152,7 @@ Remember: output ONLY a JSON object, no other text."""
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
             max_tokens=256,
             system=FORECASTER_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],

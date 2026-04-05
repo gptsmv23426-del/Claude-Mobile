@@ -19,6 +19,7 @@ class Config:
     POLYMARKET_API_KEY: str = os.environ.get("POLYMARKET_API_KEY", "")
     POLYMARKET_API_SECRET: str = os.environ.get("POLYMARKET_API_SECRET", "")
     POLYMARKET_API_PASSPHRASE: str = os.environ.get("POLYMARKET_API_PASSPHRASE", "")
+    POLYMARKET_CHAIN_ID: int = int(os.environ.get("POLYMARKET_CHAIN_ID", "137"))  # 137 = Polygon
 
     # Anthropic
     ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -113,6 +114,17 @@ class Config:
             logger.info("Running in PAPER TRADING mode — no real money will be spent.")
         else:
             logger.warning("Running in LIVE TRADING mode — real money is at risk!")
+
+
+        # Range validation for critical trading parameters
+        if not (0 < cls.KELLY_FRACTION <= 1.0):
+            raise ValueError(f"KELLY_FRACTION must be in (0, 1.0], got {cls.KELLY_FRACTION}")
+        if not (0 < cls.MAX_DRAWDOWN_GATE < 1.0):
+            raise ValueError(f"MAX_DRAWDOWN_GATE must be in (0, 1.0), got {cls.MAX_DRAWDOWN_GATE}")
+        if cls.MAX_PORTFOLIO_EXPOSURE <= 0 or cls.MAX_PORTFOLIO_EXPOSURE > 1.0:
+            raise ValueError(f"MAX_PORTFOLIO_EXPOSURE must be in (0, 1.0], got {cls.MAX_PORTFOLIO_EXPOSURE}")
+        if cls.MIN_EDGE_THRESHOLD <= 0:
+            raise ValueError(f"MIN_EDGE_THRESHOLD must be > 0, got {cls.MIN_EDGE_THRESHOLD}")
 
         if cls.MAX_POSITION_SIZE_USDC > 500:
             raise ValueError(

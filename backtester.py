@@ -63,6 +63,32 @@ HISTORICAL_TRADES_FILE = "logs/backtest_trades.csv"
 _MAX_HISTORY_FETCHES = 60
 _REQUEST_DELAY_S = 0.15  # seconds between CLOB calls (rate-limit headroom)
 
+import random as _random
+
+def _get_with_backoff(url, params=None, max_retries=3, timeout=30):
+    """GET with exponential backoff on 429 / transient errors."""
+    import time as _t
+    delay = 1.0
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout)
+            if resp.status_code == 429:
+                wait = delay + _random.uniform(0, delay * 0.5)
+                logger.warning("Rate limited. Retrying in %.1fs (attempt %d/%d)", wait, attempt + 1, max_retries)
+                _t.sleep(wait)
+                delay *= 2
+                continue
+            return resp
+        except Exception as exc:
+            if attempt == max_retries - 1:
+                raise
+            wait = delay + _random.uniform(0, delay * 0.5)
+            logger.warning("Request failed: %s. Retrying in %.1fs", exc, wait)
+            _t.sleep(wait)
+            delay *= 2
+    raise RuntimeError(f"Max retries exceeded for {url}")
+
+
 
 # ---------------------------------------------------------------------------
 # Data fetching
@@ -79,7 +105,7 @@ def _fetch_resolved_markets(days: int = 90) -> list[dict]:
         "ascending": "false",
     }
     try:
-        resp = requests.get(f"{GAMMA_API_BASE}/markets", params=params, timeout=30)
+        resp = _get_with_backoff(f"{GAMMA_API_BASE}/markets", params=params)
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, dict) and "data" in data:
@@ -140,7 +166,7 @@ def _fetch_clob_history(condition_id: str) -> Optional[list[dict]]:
     if not condition_id:
         return None
     try:
-        resp = requests.get(
+        resp = _get_with_backoff(
             f"{CLOB_API_BASE}/prices-history",
             params={"market": condition_id, "interval": "max", "fidelity": "60"},
             timeout=15,
@@ -251,7 +277,10 @@ def _simulate_trades(markets: list[dict]) -> pd.DataFrame:
                 continue
 
             # Simulate forecast accuracy at 60% — conservative, reproducible per market
-            rng = np.random.default_rng(abs(hash(m.get("id", "") or "")) % (2**31))
+            # Use deterministic seed from market_id bytes - reproducible across Python runs
+            _mid = (m.get("id") or "").encode()
+            _seed = int(_hl.md5(_mid).hexdigest()[:8], 16)
+            rng = np.random.default_rng(_seed)
             bot_correct = rng.random() < 0.60
 
             if bot_correct:

@@ -45,6 +45,34 @@ def _get_days_to_expiry(end_date_iso: str) -> float:
         return 0.0
 
 
+
+import time as _time
+import random as _random
+
+def _get_with_backoff(url, params=None, max_retries=3, timeout=30):
+    """GET with exponential backoff on 429 / transient errors."""
+    import requests
+    delay = 1.0
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout)
+            if resp.status_code == 429:
+                wait = delay + _random.uniform(0, delay * 0.5)
+                logger.warning("Rate limited (%s). Retrying in %.1fs (attempt %d/%d)", url, wait, attempt + 1, max_retries)
+                _time.sleep(wait)
+                delay *= 2
+                continue
+            resp.raise_for_status()
+            return resp
+        except Exception as exc:
+            if attempt == max_retries - 1:
+                raise
+            wait = delay + _random.uniform(0, delay * 0.5)
+            logger.warning("Request failed (%s): %s. Retrying in %.1fs", url, exc, wait)
+            _time.sleep(wait)
+            delay *= 2
+    raise RuntimeError(f"Max retries exceeded for {url}")
+
 def scan_markets() -> List[MarketOpportunity]:
     """
     Fetch active markets from Polymarket Gamma API, apply filters, and return
@@ -57,13 +85,13 @@ def scan_markets() -> List[MarketOpportunity]:
     params = {
         "active": "true",
         "closed": "false",
-        "limit": 500,
+        "limit": 30,
         "order": "volume24hr",
         "ascending": "true",
     }
 
     try:
-        resp = requests.get(f"{GAMMA_API_BASE}/markets", params=params, timeout=30)
+        resp = _get_with_backoff(f"{GAMMA_API_BASE}/markets", params=params)
         resp.raise_for_status()
         markets = resp.json()
     except Exception as exc:

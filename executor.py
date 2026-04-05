@@ -87,8 +87,10 @@ def _load_portfolio() -> dict:
 
 def _save_portfolio(portfolio: dict) -> None:
     os.makedirs("logs", exist_ok=True)
-    with open(PAPER_PORTFOLIO_FILE, "w") as f:
+    tmp = PAPER_PORTFOLIO_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(portfolio, f, indent=2)
+    os.replace(tmp, PAPER_PORTFOLIO_FILE)  # atomic on POSIX; near-atomic on Windows
 
 
 def _log_trade(trade_record: dict) -> None:
@@ -203,7 +205,7 @@ def _execute_live(decision: RiskDecision, f: ForecastResult) -> bool:
         client = ClobClient(
             host=Config.CLOB_API_BASE,
             key=Config.POLYMARKET_PRIVATE_KEY,
-            chain_id=137,  # Polygon
+            chain_id=Config.POLYMARKET_CHAIN_ID,
             funder=Config.POLYMARKET_FUNDER_ADDRESS,
             signature_type=2,  # EIP-712
         )
@@ -231,7 +233,22 @@ def _execute_live(decision: RiskDecision, f: ForecastResult) -> bool:
             size=size,
         )
 
-        resp = client.create_and_post_order(order_args)
+        # Retry order placement on transient failures (max 3 attempts)
+        import time as _t, random as _r
+        resp = None
+        last_exc: Exception | None = None
+        for _attempt in range(3):
+            try:
+                resp = client.create_and_post_order(order_args)
+                break
+            except Exception as _exc:
+                last_exc = _exc
+                if _attempt < 2:
+                    _wait = 1.5 ** _attempt + _r.uniform(0, 0.5)
+                    logger.warning("[LIVE] Order attempt %d failed: %s - retrying in %.1fs", _attempt + 1, _exc, _wait)
+                    _t.sleep(_wait)
+        if resp is None:
+            raise RuntimeError(f"Order placement failed after 3 attempts: {last_exc}")
         logger.info("[LIVE] Order placed: %s", resp)
 
         # Update paper portfolio for tracking (even in live mode we track positions)
