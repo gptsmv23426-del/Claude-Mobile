@@ -52,6 +52,40 @@ def _send_daily_summary() -> None:
     )
 
 
+def _run_weekly_evaluation() -> None:
+    """
+    Run the weekly Sonnet strategy review and send calibration report to Telegram.
+    Scheduled to run on Config.WEEKLY_EVAL_DAY at 14:00 UTC.
+
+    PLANNED (Phase 4) — the evaluator functions called here raise NotImplementedError
+    until Phase 4 is implemented. This function is intentionally a no-op until then.
+    """
+    logger = logging.getLogger("main.weekly_eval")
+    logger.info("Weekly evaluation triggered.")
+    try:
+        # PLANNED (Phase 4): uncomment when evaluator is implemented
+        # from evaluator import run_weekly_review
+        # from monitor import alert_calibration_report
+        # learned = run_weekly_review()
+        # if learned:
+        #     alert_calibration_report(
+        #         brier_score=...,   # from CalibrationReport
+        #         win_rate=...,
+        #         n_trades=...,
+        #         worst_category=learned ... ,
+        #         best_category=...,
+        #         top_lesson=learned.sonnet_rationale,
+        #         threshold_changes={
+        #             "category_min_edge": learned.category_min_edge,
+        #             "category_skip": learned.category_skip,
+        #             "ensemble_recommended": learned.ensemble_recommended,
+        #         },
+        #     )
+        logger.info("Weekly evaluation is planned but not yet implemented (Phase 4).")
+    except Exception as exc:
+        logger.error("Weekly evaluation failed (non-fatal): %s", exc)
+
+
 def _run_trading_cycle() -> None:
     logger = logging.getLogger("main.cycle")
 
@@ -140,6 +174,11 @@ def main() -> None:
     # 8:00 AM CT ≈ 14:00 UTC
     schedule.every().day.at("14:00").do(_send_daily_summary)
 
+    # Step 4b: Schedule weekly Sonnet strategy review (Phase 4 — no-op until implemented)
+    # Runs on Config.WEEKLY_EVAL_DAY at 14:00 UTC, same window as daily summary.
+    _weekly_schedule = getattr(schedule.every(), Config.WEEKLY_EVAL_DAY, schedule.every().monday)
+    _weekly_schedule.at("14:00").do(_run_weekly_evaluation)
+
     logger.info(
         "Bot running | Mode: %s | Scan interval: %d min",
         "PAPER" if IS_PAPER_TRADING else "LIVE",
@@ -149,15 +188,17 @@ def main() -> None:
     # Step 5: Main loop
     _run_trading_cycle()  # Run once immediately on startup
 
+    _last_scan = 0.0
+
     while True:
         try:
             schedule.run_pending()
 
-            # Wait for next scan interval
-            time.sleep(Config.SCAN_INTERVAL_MINUTES * 60)
+            if time.time() - _last_scan >= Config.SCAN_INTERVAL_MINUTES * 60:
+                _run_trading_cycle()
+                _last_scan = time.time()
 
-            # Run trading cycle
-            _run_trading_cycle()
+            time.sleep(60)  # tight loop — schedule fires within 60s of target time
 
         except KeyboardInterrupt:
             logger.info("Shutdown requested via keyboard interrupt.")
@@ -171,6 +212,7 @@ def main() -> None:
                 pass  # Don't let Telegram failure cascade
             logger.info("Sleeping 5 minutes before retry...")
             time.sleep(300)
+            _last_scan = time.time()  # don't immediately re-trigger scan after error recovery
 
 
 if __name__ == "__main__":

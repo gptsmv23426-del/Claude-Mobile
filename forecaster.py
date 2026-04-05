@@ -1,5 +1,53 @@
 """
 Forecaster — uses claude-haiku-4-5 to produce calibrated probability estimates.
+
+PLANNED UPGRADES (do not implement until approved):
+
+Phase 3 — Ensemble Forecasting (toggle: ENABLE_ENSEMBLE_FORECAST in .env)
+  Replace single Haiku call in forecast_market() with 3 independent calls:
+
+  Frame 1 — Base Rate Anchor:
+    system: "Start from the historical base rate for this type of event before
+             updating on the specific evidence. Anchor on what usually happens."
+
+  Frame 2 — Bull Case:
+    system: "Steelman the strongest case for YES. What probability does the
+             evidence support if you assume the most favorable interpretation?"
+
+  Frame 3 — Bear Case:
+    system: "Steelman the strongest case for NO. What probability does the
+             evidence support if you assume the most skeptical interpretation?"
+
+  Aggregation rules:
+    final_probability = mean([p1, p2, p3])
+    std_dev = stdev([p1, p2, p3])
+    if std_dev > 0.12:
+        confidence = "LOW"   # models disagree too much — not tradeable
+    elif std_dev < 0.05:
+        confidence = "HIGH"  # strong agreement across frames
+    else:
+        confidence = "MEDIUM"
+
+  Only run ensemble if Config.ENABLE_ENSEMBLE_FORECAST is True.
+  Fall back to current single-call logic otherwise.
+
+Phase 4 — Calibration-Adjusted Shrinkage
+  After computing probability, apply an additional shrinkage based on the bot's
+  recent Brier score. If Brier > 0.20 (poorly calibrated), shrink harder toward 0.5:
+    from evaluator import get_calibration_summary
+    cal = get_calibration_summary()
+    if cal and cal.brier_score > 0.20:
+        extra_shrinkage = (cal.brier_score - 0.20) * 2.0  # up to 0.6 extra at worst
+        probability = probability * (1 - extra_shrinkage) + 0.5 * extra_shrinkage
+  This automatically makes the bot more conservative when its past forecasts have been poor.
+
+Phase 4 — Per-Category Learned Thresholds
+  Read Config.LEARNED_THRESHOLDS_PATH on startup (if file exists).
+  If it contains per-category MIN_EDGE_THRESHOLD overrides, apply them:
+    learned = load_learned_thresholds()
+    category_min_edge = learned.get(research.category, {}).get("min_edge", Config.MIN_EDGE_THRESHOLD)
+  This allows Sonnet's weekly strategy review to automatically tighten or loosen
+  the edge requirement per category based on observed performance.
 """
 
 import json
@@ -85,7 +133,7 @@ Remember: output ONLY a JSON object, no other text."""
 
     try:
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=256,
             system=FORECASTER_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],

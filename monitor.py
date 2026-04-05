@@ -1,36 +1,83 @@
 """
-Monitor — Telegram alerts using python-telegram-bot (sync version).
+Monitor — Telegram alerts via direct HTTP (requests.post to Bot API).
+
+Uses requests.post() directly instead of python-telegram-bot library.
+Reason: python-telegram-bot>=20.0 is fully async — calling Bot methods
+synchronously returns a coroutine object and never sends. Direct HTTP
+is simpler, sync-safe, and has no library version concerns.
+
+PLANNED UPGRADES (do not implement until approved):
+
+Phase 4 — Weekly Calibration Report Alert
+  Add alert_calibration_report() function:
+    def alert_calibration_report(
+        brier_score: float,
+        win_rate: float,
+        n_trades: int,
+        worst_category: str,
+        best_category: str,
+        top_lesson: str,
+        threshold_changes: dict,
+    ) -> None:
+    Message format:
+      <b>WEEKLY CALIBRATION REPORT</b>
+      Trades evaluated: {n_trades}
+      Brier Score: {brier_score:.3f} (target <0.20)
+      Win Rate: {win_rate:.1%}
+      Best category: {best_category}
+      Worst category: {worst_category}
+      Sonnet lesson: {top_lesson}
+      Threshold changes: {threshold_changes}
+
+  Called from main.py on Config.WEEKLY_EVAL_DAY at the same 14:00 UTC schedule slot.
+
+Phase 4 — Outcome Resolution Alert
+  Add alert_trade_resolved() to replace alert_trade_exit() with richer data:
+    def alert_trade_resolved(
+        question: str,
+        side: str,
+        pnl: float,
+        predicted_prob: float,
+        actual_outcome: bool,
+        brier_contribution: float,
+    ) -> None:
+    Message format:
+      <b>TRADE RESOLVED</b>
+      Market: {question}
+      Side: {side} | Outcome: {"YES" if actual_outcome else "NO"}
+      Result: {"WIN" if pnl > 0 else "LOSS"} ${pnl:+.2f}
+      Predicted: {predicted_prob:.1%} | Actual: {"1.0" if actual_outcome else "0.0"}
+      Brier: {brier_contribution:.3f}
 """
 
 import logging
 from datetime import datetime
 
-import telegram
+import requests
 
 from config import Config
 
 logger = logging.getLogger(__name__)
 
-_bot: telegram.Bot | None = None
-
-
-def _get_bot() -> telegram.Bot:
-    global _bot
-    if _bot is None:
-        _bot = telegram.Bot(token=Config.TELEGRAM_BOT_TOKEN)
-    return _bot
+_TELEGRAM_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 
 def _send(text: str) -> None:
     """Send a message to the configured Telegram chat. Swallow errors — alerts must never crash the bot."""
+    if not Config.TELEGRAM_BOT_TOKEN or not Config.TELEGRAM_CHAT_ID:
+        logger.debug("Telegram not configured — skipping alert.")
+        return
     try:
-        bot = _get_bot()
-        bot.send_message(
-            chat_id=Config.TELEGRAM_CHAT_ID,
-            text=text,
-            parse_mode="HTML",
+        url = _TELEGRAM_URL.format(token=Config.TELEGRAM_BOT_TOKEN)
+        resp = requests.post(
+            url,
+            json={"chat_id": Config.TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+            timeout=10,
         )
-        logger.debug("Telegram alert sent: %s", text[:80])
+        if not resp.ok:
+            logger.error("Telegram send failed: %s %s", resp.status_code, resp.text[:200])
+        else:
+            logger.debug("Telegram alert sent: %s", text[:80])
     except Exception as exc:
         logger.error("Telegram send failed: %s", exc)
 

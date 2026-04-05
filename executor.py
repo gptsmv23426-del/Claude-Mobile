@@ -1,6 +1,46 @@
 """
 Executor — places trades in paper or live mode.
 Mode is read once at startup and never changes mid-session.
+
+PLANNED UPGRADES (do not implement until approved):
+
+Phase 4 — Real Outcome Resolution (CRITICAL prerequisite for evaluation)
+  Problem: _close_position() currently uses exit_price = entry_price (neutral/wrong).
+  The bot cannot compute real P&L or Brier scores without knowing the actual outcome.
+
+  Fix for _close_position():
+    When close_reason == "time_exit_4h_before_expiry":
+      1. Call Gamma API: GET https://gamma-api.polymarket.com/markets/{condition_id}
+      2. Parse outcomePrices field (same logic as backtester._parse_resolution())
+      3. resolved_yes = True if yes_final > 0.9, False if yes_final < 0.1, None if ambiguous
+      4. If resolved_yes is not None:
+           Compute binary P&L:
+             if pos["side"] == "YES" and resolved_yes:
+                 pnl = size_usdc * (1.0 / entry_price - 1.0)   # correct YES bet
+             elif pos["side"] == "YES" and not resolved_yes:
+                 pnl = -size_usdc                                # wrong YES bet
+             elif pos["side"] == "NO" and not resolved_yes:
+                 pnl = size_usdc * (1.0 / entry_price - 1.0)   # correct NO bet
+             elif pos["side"] == "NO" and resolved_yes:
+                 pnl = -size_usdc                                # wrong NO bet
+         else:
+             pnl = 0.0  # market not yet resolved — check again next cycle
+      5. Add to trade record: actual_outcome=resolved_yes, predicted_prob=pos["probability"]
+      6. Only close the position if resolved_yes is not None. Otherwise leave open for next scan.
+
+  Fix for _build_trade_record():
+    Add fields to every trade record for evaluation:
+      "predicted_probability": f.probability,   # already there as "probability"
+      "actual_outcome": None,                    # filled in by _close_position()
+      "brier_contribution": None,                # filled in by evaluator.py
+      "cross_ref_metaculus": None,               # filled in if Phase 2A is active
+      "cross_ref_manifold": None,                # filled in if Phase 2A is active
+
+Phase 4 — Evaluation Log Write
+  After _close_position() computes real P&L and actual_outcome:
+    from evaluator import record_resolved_trade
+    record_resolved_trade(trade_record)
+  This writes one line to logs/evaluation_log.jsonl for the weekly Sonnet review.
 """
 
 import json
@@ -14,8 +54,8 @@ from risk_manager import RiskDecision
 
 logger = logging.getLogger(__name__)
 
-PAPER_PORTFOLIO_FILE = "logs/paper_portfolio.json"
-TRADES_LOG_FILE = "logs/trades.jsonl"
+PAPER_PORTFOLIO_FILE = Config.PAPER_PORTFOLIO_FILE
+TRADES_LOG_FILE = Config.TRADES_LOG_FILE
 
 # Read PAPER_TRADING once at module import — never changes mid-session
 IS_PAPER_TRADING = Config.PAPER_TRADING
@@ -94,7 +134,6 @@ def execute_trade(decision: RiskDecision) -> dict | None:
     )
 
     trade_record = _build_trade_record(decision, "pending")
-    _log_trade(trade_record)
 
     if IS_PAPER_TRADING:
         result = _execute_paper(decision, f)
@@ -103,7 +142,7 @@ def execute_trade(decision: RiskDecision) -> dict | None:
 
     if result:
         trade_record["status"] = "executed"
-        _log_trade(trade_record)
+        _log_trade(trade_record)  # log once only, after confirmed execution
 
     return trade_record if result else None
 
@@ -126,15 +165,11 @@ def _execute_paper(decision: RiskDecision, f: ForecastResult) -> bool:
         "entry_price": entry_price,
         "entry_time": datetime.now(timezone.utc).isoformat(),
         "days_to_expiry_at_entry": f.days_to_expiry,
-        "stop_loss_price": entry_price * 0.70,  # 30% stop loss
         "condition_id": f.condition_id,
         "token_ids": f.token_ids,
     }
     portfolio["open_positions"][f.market_id] = position
-
-    # Update peak balance tracking
-    if portfolio["balance"] > portfolio.get("peak_balance", 0):
-        portfolio["peak_balance"] = portfolio["balance"]
+    # peak_balance is updated in _close_position() when cash returns after a win
 
     _save_portfolio(portfolio)
 
@@ -156,7 +191,7 @@ def _execute_live(decision: RiskDecision, f: ForecastResult) -> bool:
         from py_clob_client.clob_types import OrderArgs, OrderType
 
         client = ClobClient(
-            host="https://clob.polymarket.com",
+            host=Config.CLOB_API_BASE,
             key=Config.POLYMARKET_PRIVATE_KEY,
             chain_id=137,  # Polygon
             funder=Config.POLYMARKET_FUNDER_ADDRESS,
@@ -221,15 +256,19 @@ def monitor_open_positions() -> list[dict]:
         try:
             close_reason = None
 
-            # Time-based exit: close positions 4 hours before expiry
-            entry_time = datetime.fromisoformat(pos["entry_time"])
+            # Time-based exit: close positions 4 hours before expiry (or already past expiry)
+            entry_time_raw = datetime.fromisoformat(pos["entry_time"])
+            # Ensure timezone-aware comparison regardless of how entry_time was stored
+            if entry_time_raw.tzinfo is None:
+                entry_time_raw = entry_time_raw.replace(tzinfo=timezone.utc)
             days_at_entry = pos.get("days_to_expiry_at_entry", 999)
             now = datetime.now(timezone.utc)
-            elapsed_days = (now - entry_time.replace(tzinfo=timezone.utc)).total_seconds() / 86400
+            elapsed_days = (now - entry_time_raw).total_seconds() / 86400
             remaining_days = days_at_entry - elapsed_days
 
-            if remaining_days < (4 / 24):
-                close_reason = "time_exit_4h_before_expiry"
+            if remaining_days <= (4 / 24):
+                # Covers both "4h before expiry" and "already past expiry" (bot was offline)
+                close_reason = "time_exit_4h_before_expiry" if remaining_days > 0 else "past_expiry"
 
             # For paper trading, we can't check live price easily — rely on expiry
             # In live mode: check current price vs stop-loss
@@ -277,6 +316,13 @@ def _close_position(portfolio: dict, market_id: str, pos: dict, reason: str) -> 
 
     # For paper mode, assume we exit at current market-implied price (simplified)
     # A real exit would fetch the current price and sell
+    # BUG NOTE: exit_price = entry_price means pnl is always 0.
+    # Every daily summary will show $0 P&L and every win/loss metric is meaningless.
+    # Fix: Phase 4 — fetch actual outcomePrices from Gamma API and compute real binary P&L.
+    # Binary P&L formula:
+    #   WIN:  size_usdc * (1.0 / entry_price - 1.0)
+    #   LOSS: -size_usdc
+    # Do not close position until Gamma confirms resolution (outcomePrices > 0.9 or < 0.1).
     exit_price = entry_price  # neutral assumption — actual outcome determines real P&L
     pnl = (exit_price - entry_price) * shares
 

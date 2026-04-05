@@ -43,6 +43,56 @@ class Config:
     PREFERRED_CATEGORIES = {"CRYPTO", "MACRO", "TECHNOLOGY", "SCIENCE", "POLITICS"}
     SKIP_CATEGORIES = {"WEATHER", "SPORTS"}
 
+    # API base URLs — single source of truth, imported by market_scanner and backtester
+    GAMMA_API_BASE: str = "https://gamma-api.polymarket.com"
+    CLOB_API_BASE: str = "https://clob.polymarket.com"
+
+    # Portfolio file paths — single source of truth, imported by executor and risk_manager
+    PAPER_PORTFOLIO_FILE: str = "logs/paper_portfolio.json"
+    TRADES_LOG_FILE: str = "logs/trades.jsonl"
+
+    # -------------------------------------------------------------------------
+    # PLANNED — Phase 2A: Cross-Reference Signals (zero new deps)
+    # Add to .env when Phase 2A is implemented:
+    #   ENABLE_CROSS_REFERENCE=true
+    # -------------------------------------------------------------------------
+    ENABLE_CROSS_REFERENCE: bool = os.environ.get("ENABLE_CROSS_REFERENCE", "false").lower() == "true"
+
+    # -------------------------------------------------------------------------
+    # PLANNED — Phase 2B: FRED Macro Context (requires: pip install fredapi)
+    # Add to .env when Phase 2B is implemented:
+    #   FRED_API_KEY=your_key_here   (free at fred.stlouisfed.org)
+    #   ENABLE_MACRO_CONTEXT=true
+    # -------------------------------------------------------------------------
+    FRED_API_KEY: str = os.environ.get("FRED_API_KEY", "")
+    ENABLE_MACRO_CONTEXT: bool = os.environ.get("ENABLE_MACRO_CONTEXT", "false").lower() == "true"
+
+    # -------------------------------------------------------------------------
+    # PLANNED — Phase 2C: Local Polymarket historical data for backtester
+    # Clone https://github.com/SII-WANGZJ/Polymarket_data then set:
+    #   POLYMARKET_DATA_PATH=/path/to/Polymarket_data
+    # Backtester will use local files instead of CLOB API (removes 60-market cap)
+    # -------------------------------------------------------------------------
+    POLYMARKET_DATA_PATH: str = os.environ.get("POLYMARKET_DATA_PATH", "")
+
+    # -------------------------------------------------------------------------
+    # PLANNED — Phase 3: Ensemble Forecasting
+    # Runs 3 independent Haiku forecasts per market and averages them.
+    # Costs ~3x tokens but reduces single-call variance significantly.
+    #   ENABLE_ENSEMBLE_FORECAST=false   (keep off until paper trading proves value)
+    # -------------------------------------------------------------------------
+    ENABLE_ENSEMBLE_FORECAST: bool = os.environ.get("ENABLE_ENSEMBLE_FORECAST", "false").lower() == "true"
+
+    # -------------------------------------------------------------------------
+    # PLANNED — Phase 4: Trade Evaluation & Learning Loop
+    #   WEEKLY_EVAL_DAY=monday           (day to run Sonnet strategy review)
+    #   LEARNED_THRESHOLDS_PATH=logs/learned_thresholds.json
+    # The evaluator writes threshold recommendations here after each Sonnet review.
+    # Config will read this file on next startup and apply overrides.
+    # -------------------------------------------------------------------------
+    WEEKLY_EVAL_DAY: str = os.environ.get("WEEKLY_EVAL_DAY", "monday")
+    LEARNED_THRESHOLDS_PATH: str = os.environ.get("LEARNED_THRESHOLDS_PATH", "logs/learned_thresholds.json")
+
     @classmethod
     def validate(cls) -> None:
         """Check all required keys are present. Raise ValueError if any are missing."""
