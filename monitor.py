@@ -50,6 +50,7 @@ Phase 4 — Outcome Resolution Alert
       Brier: {brier_contribution:.3f}
 """
 
+import html
 import logging
 from datetime import datetime
 
@@ -85,11 +86,11 @@ def _send(text: str) -> None:
 def alert_trade_entry(question: str, side: str, amount: float, edge: float, confidence: str) -> None:
     _send(
         f"<b>TRADE ENTRY</b>\n"
-        f"Market: {question}\n"
-        f"Side: {side}\n"
+        f"Market: {html.escape(question)}\n"
+        f"Side: {html.escape(side)}\n"
         f"Size: ${amount:.2f}\n"
         f"Edge: {edge:.4f}\n"
-        f"Confidence: {confidence}"
+        f"Confidence: {html.escape(confidence)}"
     )
 
 
@@ -97,7 +98,7 @@ def alert_trade_exit(question: str, pnl: float) -> None:
     result = "WIN" if pnl > 0 else "LOSS"
     _send(
         f"<b>TRADE EXIT</b>\n"
-        f"Market: {question}\n"
+        f"Market: {html.escape(question)}\n"
         f"P&L: ${pnl:+.2f}\n"
         f"Result: {result}"
     )
@@ -118,15 +119,15 @@ def alert_daily_summary(n_trades: int, wins: int, pnl: float, balance: float) ->
 def alert_trade_blocked(question: str, reason: str) -> None:
     _send(
         f"<b>TRADE BLOCKED</b>\n"
-        f"Market: {question}\n"
-        f"Reason: {reason}"
+        f"Market: {html.escape(question)}\n"
+        f"Reason: {html.escape(reason)}"
     )
 
 
 def alert_error(error_type: str, message: str) -> None:
     _send(
         f"<b>ERROR</b>\n"
-        f"{error_type}: {message}"
+        f"{html.escape(error_type)}: {html.escape(message)}"
     )
 
 

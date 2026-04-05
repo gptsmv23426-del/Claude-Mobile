@@ -114,6 +114,12 @@ class Config:
         else:
             logger.warning("Running in LIVE TRADING mode — real money is at risk!")
 
+        if cls.MAX_POSITION_SIZE_USDC > 500:
+            raise ValueError(
+                f"MAX_POSITION_SIZE_USDC={cls.MAX_POSITION_SIZE_USDC} exceeds the $500 "
+                "hard safety cap. If you genuinely need larger positions, raise the cap "
+                "in config.py after deliberate review."
+            )
         if cls.MAX_POSITION_SIZE_USDC > 25:
             logger.warning(
                 "MAX_POSITION_SIZE_USDC is %.2f USDC — keep it at $25 or less "

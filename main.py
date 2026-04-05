@@ -27,6 +27,7 @@ from monitor import (
     alert_drawdown_gate,
 )
 from backtester import run_backtest, backtest_already_run
+from calibration_tracker import log_forecast, check_and_update_resolutions
 
 
 def _configure_logging() -> None:
@@ -96,6 +97,15 @@ def _run_trading_cycle() -> None:
         alert_drawdown_gate(drawdown)
         return
 
+    # Poll for resolutions from previous cycles before scanning new ones.
+    # This keeps the calibration log up to date without a separate process.
+    try:
+        n_resolved = check_and_update_resolutions()
+        if n_resolved:
+            logger.info("Calibration: %d market(s) resolved since last cycle.", n_resolved)
+    except Exception as exc:
+        logger.warning("Calibration resolution check failed (non-fatal): %s", exc)
+
     logger.info("=== Starting trading cycle ===")
 
     # Step 1: Scan markets
@@ -127,6 +137,10 @@ def _run_trading_cycle() -> None:
         # Execute the trade
         trade_record = execute_trade(decision)
         if trade_record:
+            try:
+                log_forecast(forecast)
+            except Exception as exc:
+                logger.warning("Failed to log forecast to calibration tracker: %s", exc)
             alert_trade_entry(
                 question=forecast.question,
                 side=forecast.side,
@@ -170,9 +184,12 @@ def main() -> None:
     summary = get_portfolio_summary()
     alert_startup(paper_trading=IS_PAPER_TRADING, balance=summary["balance"])
 
-    # Step 4: Schedule daily summary at 8:00 AM CT (UTC-5 / UTC-6 depending on DST)
-    # 8:00 AM CT ≈ 14:00 UTC
-    schedule.every().day.at("14:00").do(_send_daily_summary)
+    # Step 4: Schedule daily summary.
+    # DAILY_SUMMARY_TIME_UTC is read from .env (default "14:00" ≈ 8 AM CT).
+    # The `schedule` library uses the server's local clock, so deploy in UTC
+    # or set DAILY_SUMMARY_TIME_UTC to match your server timezone offset.
+    summary_time = os.environ.get("DAILY_SUMMARY_TIME_UTC", "14:00")
+    schedule.every().day.at(summary_time).do(_send_daily_summary)
 
     # Step 4b: Schedule weekly Sonnet strategy review (Phase 4 — no-op until implemented)
     # Runs on Config.WEEKLY_EVAL_DAY at 14:00 UTC, same window as daily summary.
@@ -188,17 +205,18 @@ def main() -> None:
     # Step 5: Main loop
     _run_trading_cycle()  # Run once immediately on startup
 
-    _last_scan = 0.0
+    next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
     while True:
         try:
+            # Tick the scheduler every 30 seconds so scheduled jobs fire on time
+            # regardless of how long the trading cycle took.
             schedule.run_pending()
+            time.sleep(30)
 
-            if time.time() - _last_scan >= Config.SCAN_INTERVAL_MINUTES * 60:
+            if time.time() >= next_cycle_time:
                 _run_trading_cycle()
-                _last_scan = time.time()
-
-            time.sleep(60)  # tight loop — schedule fires within 60s of target time
+                next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
         except KeyboardInterrupt:
             logger.info("Shutdown requested via keyboard interrupt.")
@@ -212,7 +230,7 @@ def main() -> None:
                 pass  # Don't let Telegram failure cascade
             logger.info("Sleeping 5 minutes before retry...")
             time.sleep(300)
-            _last_scan = time.time()  # don't immediately re-trigger scan after error recovery
+            next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
 
 if __name__ == "__main__":

@@ -36,10 +36,10 @@ Phase 4 — Calibration Feedback
 """
 
 import logging
-from typing import List
+from typing import Dict, List
 
 import anthropic
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import Config
 from market_scanner import MarketOpportunity
@@ -70,6 +70,8 @@ class ResearchResult(BaseModel):
     spread: float
     condition_id: str = ""
     token_ids: List[str] = []
+    cross_platform_divergence: float = 0.0
+    cross_platform_prices: Dict[str, float] = Field(default_factory=dict)
 
 
 def _build_search_query(market: MarketOpportunity) -> str:
@@ -92,6 +94,16 @@ def research_market(market: MarketOpportunity) -> ResearchResult | None:
     client = _get_client()
     query = _build_search_query(market)
 
+    # If the scanner already found a Metaculus community prediction, include it
+    # as a calibrated anchor before web search — no extra API call needed.
+    metaculus_note = ""
+    if market.cross_platform_prices.get("metaculus") is not None:
+        metaculus_note = (
+            f"\nMetaculus community prediction: "
+            f"{market.cross_platform_prices['metaculus']:.3f} "
+            f"(treat as a calibrated prior, not ground truth)"
+        )
+
     system_prompt = (
         "You are a research analyst for a prediction market trading firm. "
         "Your job is to gather factual evidence relevant to a binary market question "
@@ -103,7 +115,7 @@ def research_market(market: MarketOpportunity) -> ResearchResult | None:
     user_prompt = f"""Market question: {market.question}
 Category: {market.category}
 Current YES price: {market.yes_price:.3f}
-Days to expiry: {market.days_to_expiry:.1f}
+Days to expiry: {market.days_to_expiry:.1f}{metaculus_note}
 
 Please search the web for the latest relevant information and then provide:
 1. A concise evidence summary (3-5 sentences)
@@ -159,8 +171,11 @@ KEY_FACTS:
                 key_facts.append(line[2:].strip())
 
         if not summary:
-            # fallback: use whole text as summary
-            summary = text[:500]
+            logger.warning(
+                "No SUMMARY line in research response for market %s — discarding result.",
+                market.market_id,
+            )
+            return None
 
         if evidence_quality < Config.MIN_EVIDENCE_QUALITY:
             logger.info(
@@ -184,6 +199,8 @@ KEY_FACTS:
             spread=market.spread,
             condition_id=market.condition_id,
             token_ids=market.token_ids,
+            cross_platform_divergence=market.cross_platform_divergence,
+            cross_platform_prices=market.cross_platform_prices,
         )
 
     except Exception as exc:

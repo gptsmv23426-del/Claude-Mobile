@@ -460,11 +460,34 @@ def run_backtest() -> dict:
     else:
         logger.info("Backtest passed Sharpe threshold: %.3f >= %.3f", sharpe, Config.MIN_BACKTEST_SHARPE)
 
+    # Mark backtest as done, recording the config fingerprint so a config change
+    # triggers a fresh backtest on next startup.
     with open(BACKTEST_DONE_FLAG, "w") as f:
-        f.write(datetime.now().isoformat())
+        f.write(f"{datetime.now().isoformat()}|{_config_fingerprint()}")
 
     return metrics
 
 
+def _config_fingerprint() -> str:
+    """Return a short hash of the config values that affect backtest results."""
+    import hashlib
+    sig = (
+        f"{Config.MIN_EDGE_THRESHOLD}|{Config.MIN_MARKET_VOLUME_USD}|"
+        f"{Config.KELLY_FRACTION}|{Config.MAX_POSITION_SIZE_USDC}|"
+        f"{Config.MAX_SPREAD}"
+    )
+    return hashlib.md5(sig.encode()).hexdigest()[:8]
+
+
 def backtest_already_run() -> bool:
-    return os.path.exists(BACKTEST_DONE_FLAG)
+    if not os.path.exists(BACKTEST_DONE_FLAG):
+        return False
+    try:
+        stored = open(BACKTEST_DONE_FLAG).read().strip()
+        # Flag format: "<iso_timestamp>|<config_fingerprint>"
+        if "|" not in stored:
+            return False  # old format — re-run
+        _, stored_fp = stored.rsplit("|", 1)
+        return stored_fp == _config_fingerprint()
+    except Exception:
+        return False

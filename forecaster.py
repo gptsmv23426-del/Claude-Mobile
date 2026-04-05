@@ -52,10 +52,11 @@ Phase 4 — Per-Category Learned Thresholds
 
 import json
 import logging
-from typing import Literal
+import re
+from typing import Dict, Literal
 
 import anthropic
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import Config
 from researcher import ResearchResult
@@ -96,6 +97,9 @@ class ForecastResult(BaseModel):
     spread: float
     condition_id: str = ""
     token_ids: list = []
+    category: str = ""
+    cross_platform_divergence: float = 0.0
+    cross_platform_prices: Dict[str, float] = Field(default_factory=dict)
 
 
 def _apply_calibration_penalty(probability: float, evidence_quality: float) -> float:
@@ -115,6 +119,21 @@ def forecast_market(research: ResearchResult) -> ForecastResult | None:
     """
     client = _get_client()
 
+    # When other platforms have priced the same event, include their prices as
+    # additional signal. If your estimate diverges from these, you should have
+    # an explicit reason — not just different web search results.
+    cross_platform_section = ""
+    if research.cross_platform_prices:
+        lines = [
+            f"  {platform}: {prob:.3f}"
+            for platform, prob in research.cross_platform_prices.items()
+        ]
+        cross_platform_section = (
+            "\n\nCross-platform prices for the same event (independent markets):\n"
+            + "\n".join(lines)
+            + "\nIf your probability diverges from these, explain the discrepancy in your rationale."
+        )
+
     user_prompt = f"""Market question: {research.question}
 Category: {research.category}
 Current YES price (market implied probability): {research.yes_price:.3f}
@@ -126,7 +145,7 @@ Evidence summary:
 {research.evidence_summary}
 
 Key facts:
-{chr(10).join(f"- {f}" for f in research.key_facts)}
+{chr(10).join(f"- {f}" for f in research.key_facts)}{cross_platform_section}
 
 Based on this evidence, what is the true probability that the YES outcome occurs?
 Remember: output ONLY a JSON object, no other text."""
@@ -145,12 +164,10 @@ Remember: output ONLY a JSON object, no other text."""
                 text += block.text
         text = text.strip()
 
-        # Strip markdown fences if present
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        text = text.strip().rstrip("```").strip()
+        # Strip markdown fences if present (e.g. ```json ... ``` or ``` ... ```)
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```\s*$", "", text)
+        text = text.strip()
 
         data = json.loads(text)
         raw_prob = float(data["probability"])
@@ -201,6 +218,9 @@ Remember: output ONLY a JSON object, no other text."""
             spread=research.spread,
             condition_id=research.condition_id,
             token_ids=research.token_ids,
+            category=research.category,
+            cross_platform_divergence=research.cross_platform_divergence,
+            cross_platform_prices=research.cross_platform_prices,
         )
 
     except Exception as exc:
