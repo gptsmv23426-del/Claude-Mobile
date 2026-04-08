@@ -148,13 +148,19 @@ KEY_FACTS:
         for line in text.splitlines():
             line = line.strip()
             # Strip markdown bold/italic markers so **SUMMARY:** matches
-            line_clean = line.replace("**", "").replace("__", "")
+            line_clean = line.replace("**", "").replace("__", "").replace("*", "")
             line_upper = line_clean.upper()
-            if line_upper.startswith("EVIDENCE_QUALITY:"):
+            if "EVIDENCE_QUALITY" in line_upper and ":" in line_clean:
+                # Handle various formats: "EVIDENCE_QUALITY: 0.7", "Evidence Quality: 0.7", etc.
                 try:
-                    evidence_quality = float(line_clean.split(":", 1)[1].strip())
-                    evidence_quality = max(0.0, min(1.0, evidence_quality))
-                except ValueError:
+                    after_colon = line_clean.split(":", 1)[1].strip()
+                    # Extract first float-like token
+                    import re
+                    match = re.search(r"(\d+\.?\d*)", after_colon)
+                    if match:
+                        evidence_quality = float(match.group(1))
+                        evidence_quality = max(0.0, min(1.0, evidence_quality))
+                except (ValueError, IndexError):
                     pass
             elif line_upper.startswith("SUMMARY:"):
                 summary = line_clean.split(":", 1)[1].strip()
@@ -186,6 +192,9 @@ KEY_FACTS:
                 market.market_id,
             )
             return None
+
+        if evidence_quality == 0.0:
+            logger.debug("Evidence quality 0.0 — response text snippet: %s", text[:500])
 
         if evidence_quality < Config.MIN_EVIDENCE_QUALITY:
             logger.info(

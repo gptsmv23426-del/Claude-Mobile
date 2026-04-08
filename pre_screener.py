@@ -42,9 +42,13 @@ _SYSTEM = (
     "A market is tradeable if: (1) the outcome is objectively verifiable, "
     "(2) there is likely public information that could give an edge over the current price, "
     "(3) the question is not too vague or too far in the future to forecast. "
-    "A market is NOT tradeable if: it is essentially random, depends on unknowable private info, "
-    "has ambiguous resolution criteria, or is already priced efficiently with no plausible edge. "
-    "Be selective — reject at least 30% of markets. We only want to research high-potential trades."
+    "IMPORTANT: Markets priced near 0.01-0.10 or 0.90-0.99 are OFTEN tradeable — "
+    "extreme-outcome markets (e.g. 'Will X hit $200?') can have edge by betting NO "
+    "when the price is mispriced even slightly. Do NOT reject a market just because "
+    "the outcome seems unlikely. "
+    "A market is NOT tradeable ONLY if: it is essentially random with no information edge, "
+    "depends on unknowable private info, or has ambiguous resolution criteria. "
+    "Pass at least 50% of markets. When in doubt, pass the market through."
 )
 
 
