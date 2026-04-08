@@ -44,6 +44,12 @@ class Config:
     MAX_MARKETS_PER_CYCLE: int = int(os.environ.get("MAX_MARKETS_PER_CYCLE", "8"))
     MAX_MARKETS_PER_CATEGORY: int = int(os.environ.get("MAX_MARKETS_PER_CATEGORY", "2"))
 
+    # Rate limiting
+    TPM_LIMIT: int = int(os.environ.get("TPM_LIMIT", "50000"))
+
+    # Pre-screener
+    PRE_SCREEN_ENABLED: bool = os.environ.get("PRE_SCREEN_ENABLED", "true").lower() == "true"
+
     PREFERRED_CATEGORIES = {"CRYPTO", "MACRO", "TECHNOLOGY", "SCIENCE", "POLITICS"}
     SKIP_CATEGORIES = {"WEATHER", "SPORTS"}
 
