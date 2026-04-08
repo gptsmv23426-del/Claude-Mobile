@@ -1,6 +1,10 @@
 """
-Risk manager — runs 10 checks before approving any trade.
+Risk manager — runs 11 checks before approving any trade.
 All checks must pass or the trade is blocked.
+
+Check 11 (devil's advocate critic, optional):
+  If a CritiqueResult is passed, MEDIUM concern halves Kelly fraction for that trade.
+  HIGH concern is handled upstream in main.py before evaluate_trade() is called.
 """
 
 import json
@@ -43,13 +47,7 @@ def _load_portfolio() -> dict:
 def _kelly_position_size(edge: float, entry_price: float, portfolio_balance: float) -> float:
     """
     Fractional Kelly sizing for a binary prediction market.
-
-    Standard Kelly: f* = edge / (1 - entry_price)
-    where edge = forecast_probability - market_price (already computed by forecaster).
-
-    Using the entry_price (what you pay per share) in the denominator is correct.
-    Using the opposite side's price was wrong: it diverges from entry_price whenever
-    the spread is non-zero, systematically over-sizing YES bets and under-sizing NO bets.
+    f* = edge / (1 - entry_price)  (Kelly fraction for binary bet at given entry price)
     """
     denominator = 1.0 - entry_price
     if denominator <= 0:
@@ -59,9 +57,15 @@ def _kelly_position_size(edge: float, entry_price: float, portfolio_balance: flo
     return min(size, Config.MAX_POSITION_SIZE_USDC)
 
 
-def evaluate_trade(forecast: ForecastResult) -> RiskDecision:
+def evaluate_trade(forecast: ForecastResult, critique=None) -> RiskDecision:
     """
-    Run all 10 risk checks. Return RiskDecision indicating approval or block reason.
+    Run all risk checks. Return RiskDecision indicating approval or block reason.
+
+    Args:
+        forecast: ForecastResult from forecaster.py
+        critique: Optional CritiqueResult from critic.py. HIGH concern blocks (defensive
+                  duplicate — main.py already filters HIGH before calling here). MEDIUM
+                  concern halves the Kelly fraction for this trade.
     """
     portfolio = _load_portfolio()
     balance = portfolio.get("balance", 1000.0)
@@ -105,7 +109,7 @@ def evaluate_trade(forecast: ForecastResult) -> RiskDecision:
         raw_size = max_exposure
     logger.debug("Check 5 PASS: capped_size=%.2f USDC (max_exposure=%.2f)", raw_size, max_exposure)
 
-    # Check 6: Drawdown gate — if down > MAX_DRAWDOWN_GATE from peak, pause all trading
+    # Check 6: Drawdown gate
     if peak_balance > 0:
         drawdown = (peak_balance - balance) / peak_balance
         if drawdown > Config.MAX_DRAWDOWN_GATE:
@@ -134,11 +138,23 @@ def evaluate_trade(forecast: ForecastResult) -> RiskDecision:
         return block(f"Already have open position in market {forecast.market_id}")
     logger.debug("Check 10 PASS: no duplicate position")
 
+    # Check 11: Devil's advocate critic concern level (optional)
+    if critique is not None:
+        concern = getattr(critique, "concern_level", "LOW")
+        if concern == "HIGH":
+            rationale = getattr(critique, "rationale", "unspecified")
+            return block(f"Critic veto (HIGH): {rationale}")
+        if concern == "MEDIUM":
+            raw_size = raw_size * 0.5
+            logger.info(
+                "Check 11: Critic concern MEDIUM — Kelly fraction halved to $%.2f for '%s'",
+                raw_size, forecast.question[:50],
+            )
+    logger.debug("Check 11 PASS: critic concern=%s", getattr(critique, "concern_level", "N/A"))
+
     logger.info(
         "ALL CHECKS PASSED — Approving trade: %s | Side: %s | Size: $%.2f",
-        forecast.question[:50],
-        forecast.side,
-        raw_size,
+        forecast.question[:50], forecast.side, raw_size,
     )
     return RiskDecision(
         approved=True,
@@ -149,10 +165,7 @@ def evaluate_trade(forecast: ForecastResult) -> RiskDecision:
 
 
 def check_drawdown_gate() -> tuple[bool, float]:
-    """
-    Returns (is_paused, drawdown_pct).
-    Call this before starting a trading session.
-    """
+    """Returns (is_paused, drawdown_pct). Call before starting a trading session."""
     portfolio = _load_portfolio()
     balance = portfolio.get("balance", 1000.0)
     peak = portfolio.get("peak_balance", balance)

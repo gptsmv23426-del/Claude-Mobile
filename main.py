@@ -17,11 +17,13 @@ from researcher import research_markets
 from forecaster import forecast_markets
 from risk_manager import evaluate_trade, check_drawdown_gate
 from executor import execute_trade, monitor_open_positions, get_portfolio_summary, IS_PAPER_TRADING
+from critic import challenge_forecast
 from monitor import (
     alert_startup,
     alert_trade_entry,
     alert_trade_blocked,
     alert_trade_exit,
+    alert_trade_resolved,
     alert_daily_summary,
     alert_error,
     alert_drawdown_gate,
@@ -57,32 +59,37 @@ def _run_weekly_evaluation() -> None:
     """
     Run the weekly Sonnet strategy review and send calibration report to Telegram.
     Scheduled to run on Config.WEEKLY_EVAL_DAY at 14:00 UTC.
-
-    PLANNED (Phase 4) — the evaluator functions called here raise NotImplementedError
-    until Phase 4 is implemented. This function is intentionally a no-op until then.
+    Requires >= 10 resolved trades in evaluation_log.jsonl to produce a report.
     """
     logger = logging.getLogger("main.weekly_eval")
     logger.info("Weekly evaluation triggered.")
     try:
-        # PLANNED (Phase 4): uncomment when evaluator is implemented
-        # from evaluator import run_weekly_review
-        # from monitor import alert_calibration_report
-        # learned = run_weekly_review()
-        # if learned:
-        #     alert_calibration_report(
-        #         brier_score=...,   # from CalibrationReport
-        #         win_rate=...,
-        #         n_trades=...,
-        #         worst_category=learned ... ,
-        #         best_category=...,
-        #         top_lesson=learned.sonnet_rationale,
-        #         threshold_changes={
-        #             "category_min_edge": learned.category_min_edge,
-        #             "category_skip": learned.category_skip,
-        #             "ensemble_recommended": learned.ensemble_recommended,
-        #         },
-        #     )
-        logger.info("Weekly evaluation is planned but not yet implemented (Phase 4).")
+        from evaluator import run_weekly_review, get_calibration_summary
+        from monitor import alert_calibration_report
+
+        report = get_calibration_summary()
+        learned = run_weekly_review()
+
+        if learned and report:
+            alert_calibration_report(
+                brier_score=report.brier_score,
+                win_rate=report.win_rate,
+                n_trades=report.n_trades,
+                worst_category=report.worst_category,
+                best_category=report.best_category,
+                top_lesson=learned.sonnet_rationale,
+                threshold_changes={
+                    "category_min_edge": learned.category_min_edge,
+                    "category_skip": learned.category_skip,
+                    "ensemble_recommended": learned.ensemble_recommended,
+                },
+            )
+            logger.info(
+                "Weekly evaluation complete. Brier=%.3f Win=%.1f%% Trades=%d",
+                report.brier_score, report.win_rate * 100, report.n_trades,
+            )
+        else:
+            logger.info("Weekly evaluation skipped — insufficient resolved trade data.")
     except Exception as exc:
         logger.error("Weekly evaluation failed (non-fatal): %s", exc)
 
@@ -98,7 +105,6 @@ def _run_trading_cycle() -> None:
         return
 
     # Poll for resolutions from previous cycles before scanning new ones.
-    # This keeps the calibration log up to date without a separate process.
     try:
         n_resolved = check_and_update_resolutions()
         if n_resolved:
@@ -126,15 +132,29 @@ def _run_trading_cycle() -> None:
         logger.info("No forecasts produced.")
         return
 
-    # Step 4: Risk check and execute each forecast
+    # Step 4: Critic + risk check + execute
     for forecast in forecasts:
-        decision = evaluate_trade(forecast)
+
+        # Step 3.5: Devil's advocate critique
+        critique = None
+        try:
+            critique = challenge_forecast(forecast)
+        except Exception as exc:
+            logger.warning("Critic unavailable for '%s': %s", forecast.question[:50], exc)
+
+        if critique is not None and critique.concern_level == "HIGH":
+            alert_trade_blocked(
+                forecast.question,
+                f"Critic veto: {critique.rationale}",
+            )
+            continue
+
+        decision = evaluate_trade(forecast, critique=critique)
 
         if not decision.approved:
             alert_trade_blocked(forecast.question, decision.blocked_reason or "unknown")
             continue
 
-        # Execute the trade
         trade_record = execute_trade(decision)
         if trade_record:
             try:
@@ -147,12 +167,31 @@ def _run_trading_cycle() -> None:
                 amount=decision.position_size_usdc,
                 edge=forecast.edge,
                 confidence=forecast.confidence,
+                critic_concern=getattr(critique, "concern_level", None),
+                critic_summary=(
+                    critique.counter_arguments[0] if critique and critique.counter_arguments else None
+                ),
             )
 
     # Step 5: Monitor open positions for exits
     closed_positions = monitor_open_positions()
     for pos in closed_positions:
-        alert_trade_exit(question=pos["question"], pnl=pos["pnl"])
+        if pos.get("resolved_yes") is not None and pos.get("predicted_prob") is not None:
+            # Confirmed outcome — use richer resolved alert with Brier score
+            predicted_prob = pos["predicted_prob"]
+            actual_outcome = pos["resolved_yes"]
+            brier = (predicted_prob - (1.0 if actual_outcome else 0.0)) ** 2
+            alert_trade_resolved(
+                question=pos["question"],
+                side=pos.get("side", ""),
+                pnl=pos["pnl"],
+                predicted_prob=predicted_prob,
+                actual_outcome=actual_outcome,
+                brier_contribution=round(brier, 4),
+            )
+        else:
+            # Stop-loss or unresolved exit — use basic exit alert
+            alert_trade_exit(question=pos["question"], pnl=pos["pnl"])
 
     logger.info("=== Trading cycle complete ===")
 
@@ -163,14 +202,12 @@ def main() -> None:
 
     logger.info("Polymarket Autonomous Trading Bot starting up...")
 
-    # Step 1: Validate config — fail fast if keys missing
     try:
         Config.validate()
     except ValueError as exc:
         logger.critical("Config validation failed: %s", exc)
         raise SystemExit(1)
 
-    # Step 2: Run backtest on first launch
     if not backtest_already_run():
         logger.info("First launch — running backtest...")
         try:
@@ -180,19 +217,12 @@ def main() -> None:
     else:
         logger.info("Backtest already completed — skipping.")
 
-    # Step 3: Send startup alert
     summary = get_portfolio_summary()
     alert_startup(paper_trading=IS_PAPER_TRADING, balance=summary["balance"])
 
-    # Step 4: Schedule daily summary.
-    # DAILY_SUMMARY_TIME_UTC is read from .env (default "14:00" ≈ 8 AM CT).
-    # The `schedule` library uses the server's local clock, so deploy in UTC
-    # or set DAILY_SUMMARY_TIME_UTC to match your server timezone offset.
     summary_time = os.environ.get("DAILY_SUMMARY_TIME_UTC", "14:00")
     schedule.every().day.at(summary_time).do(_send_daily_summary)
 
-    # Step 4b: Schedule weekly Sonnet strategy review (Phase 4 — no-op until implemented)
-    # Runs on Config.WEEKLY_EVAL_DAY at 14:00 UTC, same window as daily summary.
     _weekly_schedule = getattr(schedule.every(), Config.WEEKLY_EVAL_DAY, schedule.every().monday)
     _weekly_schedule.at("14:00").do(_run_weekly_evaluation)
 
@@ -202,15 +232,12 @@ def main() -> None:
         Config.SCAN_INTERVAL_MINUTES,
     )
 
-    # Step 5: Main loop
     _run_trading_cycle()  # Run once immediately on startup
 
     next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
     while True:
         try:
-            # Tick the scheduler every 30 seconds so scheduled jobs fire on time
-            # regardless of how long the trading cycle took.
             schedule.run_pending()
             time.sleep(30)
 
@@ -227,7 +254,7 @@ def main() -> None:
             try:
                 alert_error(type(exc).__name__, str(exc)[:200])
             except Exception:
-                pass  # Don't let Telegram failure cascade
+                pass
             logger.info("Sleeping 5 minutes before retry...")
             time.sleep(300)
             next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60

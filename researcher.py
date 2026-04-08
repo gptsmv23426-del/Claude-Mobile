@@ -1,38 +1,14 @@
 """
 Researcher — uses claude-haiku-4-5 with web search to gather evidence for each market.
 
-PLANNED UPGRADES (do not implement until approved):
+Phase 2A (ENABLE_CROSS_REFERENCE): cross-platform signals already in cross_platform_prices;
+  consensus shrinkage is applied in forecaster.py after probability generation.
 
-Phase 2A — Cross-Reference Integration (zero new deps)
-  Before calling Claude, query signals/cross_reference.py for each market:
-    result = cross_reference_market(market.question)
-    # result.metaculus_prob: float | None  (Metaculus crowd median)
-    # result.manifold_prob:  float | None  (Manifold binary market price)
-    # result.agreement_score: float        (how much sources agree, 0-1)
-  Inject into user_prompt as an additional context block:
-    "External forecast signals:
-     - Metaculus crowd: {result.metaculus_prob:.1%} YES
-     - Manifold Markets: {result.manifold_prob:.1%} YES
-     - Agreement score: {result.agreement_score:.2f}"
-  If no match found, omit the block silently.
+Phase 2B (ENABLE_MACRO_CONTEXT + FRED_API_KEY): injects FRED macro snapshot into
+  system_prompt for MACRO category markets. Graceful fallback if unavailable.
 
-Phase 2B — FRED Macro Context (requires: pip install fredapi + FRED_API_KEY in .env)
-  At the top of research_market(), check:
-    if market.category == "MACRO" and Config.ENABLE_MACRO_CONTEXT:
-        macro = get_macro_snapshot()  # from signals/macro_context.py
-  Inject macro snapshot into system_prompt for MACRO markets:
-    "Current macro environment: Fed Funds={macro.fed_funds}%, CPI={macro.cpi}%,
-     Unemployment={macro.unemployment}%, S&P500={macro.sp500}, 10Y={macro.yield_10y}%"
-  Cache the snapshot for 24h — do not fetch FRED on every market scan.
-
-Phase 4 — Calibration Feedback
-  Import and read the latest calibration report from evaluator.py:
-    from evaluator import get_calibration_summary
-    cal = get_calibration_summary()
-  Inject into system_prompt:
-    "Recent bot calibration: Brier={cal.brier_score:.3f}, Win rate={cal.win_rate:.1%}.
-     Overconfident in {cal.worst_category}. Apply extra skepticism there."
-  This closes the feedback loop: past performance influences future research framing.
+Phase 4 (future): inject calibration feedback from evaluator.get_calibration_summary()
+  to close the feedback loop between past performance and research framing.
 """
 
 import logging
@@ -60,7 +36,7 @@ class ResearchResult(BaseModel):
     market_id: str
     question: str
     evidence_summary: str
-    evidence_quality: float  # 0.0 – 1.0
+    evidence_quality: float  # 0.0 - 1.0
     key_facts: List[str]
     category: str
     yes_price: float
@@ -88,14 +64,12 @@ def _build_search_query(market: MarketOpportunity) -> str:
 
 def research_market(market: MarketOpportunity) -> ResearchResult | None:
     """
-    Research a single market using Claude haiku with web search.
+    Research a single market using Claude Haiku with web search.
     Returns None if evidence quality is below threshold.
     """
     client = _get_client()
-    query = _build_search_query(market)
 
-    # If the scanner already found a Metaculus community prediction, include it
-    # as a calibrated anchor before web search — no extra API call needed.
+    # If scanner found Metaculus data, include it as a calibrated prior anchor
     metaculus_note = ""
     if market.cross_platform_prices.get("metaculus") is not None:
         metaculus_note = (
@@ -111,6 +85,18 @@ def research_market(market: MarketOpportunity) -> ResearchResult | None:
         "Be objective. Focus on credible sources, recency, and direct relevance. "
         "Do NOT make a trading recommendation — only report facts."
     )
+
+    # Phase 2B: inject FRED macro context for MACRO category markets
+    if market.category == "MACRO" and Config.ENABLE_MACRO_CONTEXT:
+        try:
+            from signals.macro_context import get_macro_snapshot, format_macro_for_prompt
+            snapshot = get_macro_snapshot()
+            if snapshot:
+                macro_str = format_macro_for_prompt(snapshot)
+                if macro_str:
+                    system_prompt += f"\n\n{macro_str}. Use this as context when assessing macro-related evidence."
+        except Exception as exc:
+            logger.debug("Macro context unavailable (non-fatal): %s", exc)
 
     user_prompt = f"""Market question: {market.question}
 Category: {market.category}
@@ -142,7 +128,6 @@ KEY_FACTS:
             messages=[{"role": "user", "content": user_prompt}],
         )
 
-        # Extract text from response
         text = ""
         for block in response.content:
             if hasattr(block, "text"):
@@ -152,7 +137,6 @@ KEY_FACTS:
             logger.warning("Empty response for market: %s", market.question[:60])
             return None
 
-        # Parse response
         evidence_quality = 0.0
         summary = ""
         key_facts: List[str] = []

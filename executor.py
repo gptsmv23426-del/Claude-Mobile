@@ -2,51 +2,19 @@
 Executor — places trades in paper or live mode.
 Mode is read once at startup and never changes mid-session.
 
-PLANNED UPGRADES (do not implement until approved):
-
-Phase 4 — Real Outcome Resolution (CRITICAL prerequisite for evaluation)
-  Problem: _close_position() currently uses exit_price = entry_price (neutral/wrong).
-  The bot cannot compute real P&L or Brier scores without knowing the actual outcome.
-
-  Fix for _close_position():
-    When close_reason == "time_exit_4h_before_expiry":
-      1. Call Gamma API: GET https://gamma-api.polymarket.com/markets/{condition_id}
-      2. Parse outcomePrices field (same logic as backtester._parse_resolution())
-      3. resolved_yes = True if yes_final > 0.9, False if yes_final < 0.1, None if ambiguous
-      4. If resolved_yes is not None:
-           Compute binary P&L:
-             if pos["side"] == "YES" and resolved_yes:
-                 pnl = size_usdc * (1.0 / entry_price - 1.0)   # correct YES bet
-             elif pos["side"] == "YES" and not resolved_yes:
-                 pnl = -size_usdc                                # wrong YES bet
-             elif pos["side"] == "NO" and not resolved_yes:
-                 pnl = size_usdc * (1.0 / entry_price - 1.0)   # correct NO bet
-             elif pos["side"] == "NO" and resolved_yes:
-                 pnl = -size_usdc                                # wrong NO bet
-         else:
-             pnl = 0.0  # market not yet resolved — check again next cycle
-      5. Add to trade record: actual_outcome=resolved_yes, predicted_prob=pos["probability"]
-      6. Only close the position if resolved_yes is not None. Otherwise leave open for next scan.
-
-  Fix for _build_trade_record():
-    Add fields to every trade record for evaluation:
-      "predicted_probability": f.probability,   # already there as "probability"
-      "actual_outcome": None,                    # filled in by _close_position()
-      "brier_contribution": None,                # filled in by evaluator.py
-      "cross_ref_metaculus": None,               # filled in if Phase 2A is active
-      "cross_ref_manifold": None,                # filled in if Phase 2A is active
-
-Phase 4 — Evaluation Log Write
-  After _close_position() computes real P&L and actual_outcome:
-    from evaluator import record_resolved_trade
-    record_resolved_trade(trade_record)
-  This writes one line to logs/evaluation_log.jsonl for the weekly Sonnet review.
+Phase 4 (implemented):
+- _fetch_resolution(): calls Gamma API to confirm YES/NO outcome before closing
+- monitor_open_positions(): waits for real resolution on time-exits; position stays
+  open if market not yet resolved (no more exit_price=0 on every time-exit)
+- _record_to_evaluator(): writes ResolvedTrade to evaluation_log.jsonl on confirmed close
+- Paper mode stop-loss: _get_current_price() now runs in both paper and live modes
 """
 
 import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from config import Config
 from forecaster import ForecastResult
@@ -57,7 +25,6 @@ logger = logging.getLogger(__name__)
 PAPER_PORTFOLIO_FILE = Config.PAPER_PORTFOLIO_FILE
 TRADES_LOG_FILE = Config.TRADES_LOG_FILE
 
-# Read PAPER_TRADING once at module import — never changes mid-session
 IS_PAPER_TRADING = Config.PAPER_TRADING
 
 
@@ -90,7 +57,7 @@ def _save_portfolio(portfolio: dict) -> None:
     tmp = PAPER_PORTFOLIO_FILE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(portfolio, f, indent=2)
-    os.replace(tmp, PAPER_PORTFOLIO_FILE)  # atomic on POSIX; near-atomic on Windows
+    os.replace(tmp, PAPER_PORTFOLIO_FILE)
 
 
 def _log_trade(trade_record: dict) -> None:
@@ -116,6 +83,8 @@ def _build_trade_record(decision: RiskDecision, status: str) -> dict:
         "rationale": f.rationale,
         "status": status,
         "paper_trading": IS_PAPER_TRADING,
+        "actual_outcome": None,      # filled in on resolution
+        "brier_contribution": None,  # filled in by evaluator
     }
 
 
@@ -130,7 +99,6 @@ def execute_trade(decision: RiskDecision) -> dict | None:
 
     f: ForecastResult = decision.forecast
 
-    # Log rationale BEFORE executing
     logger.info(
         "EXECUTING TRADE | Market: %s | Side: %s | Size: $%.2f | "
         "Probability: %.3f | Edge: %.4f | Confidence: %s | Rationale: %s",
@@ -152,7 +120,7 @@ def execute_trade(decision: RiskDecision) -> dict | None:
 
     if result:
         trade_record["status"] = "executed"
-        _log_trade(trade_record)  # log once only, after confirmed execution
+        _log_trade(trade_record)
 
     return trade_record if result else None
 
@@ -176,12 +144,17 @@ def _execute_paper(decision: RiskDecision, f: ForecastResult) -> bool:
         "entry_price": entry_price,
         "entry_time": now.isoformat(),
         "expiry_time": (now + timedelta(days=f.days_to_expiry)).isoformat(),
-        "stop_loss_price": entry_price * 0.70,  # 30% stop loss
+        "stop_loss_price": entry_price * 0.70,
         "condition_id": f.condition_id,
         "token_ids": f.token_ids,
+        # Phase 4: needed to build ResolvedTrade on close
+        "probability": f.probability,
+        "category": f.category,
+        "edge": f.edge,
+        "confidence": f.confidence,
+        "evidence_quality": f.evidence_quality,
     }
     portfolio["open_positions"][f.market_id] = position
-    # peak_balance is updated in _close_position() when cash returns after a win
 
     _save_portfolio(portfolio)
 
@@ -200,14 +173,14 @@ def _execute_live(decision: RiskDecision, f: ForecastResult) -> bool:
     """Place a real order via py-clob-client."""
     try:
         from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.clob_types import OrderArgs
 
         client = ClobClient(
             host=Config.CLOB_API_BASE,
             key=Config.POLYMARKET_PRIVATE_KEY,
             chain_id=Config.POLYMARKET_CHAIN_ID,
             funder=Config.POLYMARKET_FUNDER_ADDRESS,
-            signature_type=2,  # EIP-712
+            signature_type=2,
         )
 
         if not f.token_ids or len(f.token_ids) < 2:
@@ -227,13 +200,8 @@ def _execute_live(decision: RiskDecision, f: ForecastResult) -> bool:
 
         size = round(decision.position_size_usdc / price, 4) if price > 0 else 0
 
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=price,
-            size=size,
-        )
+        order_args = OrderArgs(token_id=token_id, price=price, size=size)
 
-        # Retry order placement on transient failures (max 3 attempts)
         import time as _t, random as _r
         resp = None
         last_exc: Exception | None = None
@@ -251,7 +219,6 @@ def _execute_live(decision: RiskDecision, f: ForecastResult) -> bool:
             raise RuntimeError(f"Order placement failed after 3 attempts: {last_exc}")
         logger.info("[LIVE] Order placed: %s", resp)
 
-        # Update paper portfolio for tracking (even in live mode we track positions)
         portfolio = _load_portfolio()
         position = {
             "market_id": f.market_id,
@@ -266,6 +233,12 @@ def _execute_live(decision: RiskDecision, f: ForecastResult) -> bool:
             "order_id": str(resp),
             "condition_id": f.condition_id,
             "token_ids": f.token_ids,
+            # Phase 4: needed to build ResolvedTrade on close
+            "probability": f.probability,
+            "category": f.category,
+            "edge": f.edge,
+            "confidence": f.confidence,
+            "evidence_quality": f.evidence_quality,
         }
         portfolio["open_positions"][f.market_id] = position
         portfolio["balance"] -= decision.position_size_usdc
@@ -280,10 +253,100 @@ def _execute_live(decision: RiskDecision, f: ForecastResult) -> bool:
         return False
 
 
+def _fetch_resolution(condition_id: str) -> Optional[bool]:
+    """
+    Fetch market resolution from Gamma API.
+    Returns True = YES won, False = NO won, None = not yet resolved.
+    Uses same outcomePrices parsing logic as backtester._parse_resolution().
+    """
+    try:
+        import requests
+        resp = requests.get(
+            f"{Config.GAMMA_API_BASE}/markets/{condition_id}",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        m = resp.json()
+
+        raw = m.get("outcomePrices")
+        if raw:
+            prices = json.loads(raw) if isinstance(raw, str) else raw
+            yes_final = float(prices[0])
+            if yes_final > 0.9:
+                return True
+            if yes_final < 0.1:
+                return False
+
+        # Fallback: token price list
+        for token in (m.get("tokens") or []):
+            if (token.get("outcome") or "").upper() == "YES":
+                price = float(token.get("price", 0) or 0)
+                if price > 0.9:
+                    return True
+                if price < 0.1:
+                    return False
+
+    except Exception as exc:
+        logger.debug("Resolution fetch failed for %s: %s", condition_id, exc)
+
+    return None
+
+
+def _record_to_evaluator(pos: dict, pnl: float, resolved_yes: bool) -> None:
+    """Write a ResolvedTrade to evaluation_log.jsonl. Non-fatal on any error."""
+    try:
+        from evaluator import record_resolved_trade, ResolvedTrade
+
+        entry_time = pos.get("entry_time", "")
+        days_held = 0.0
+        if entry_time:
+            try:
+                entry_dt = datetime.fromisoformat(entry_time)
+                if entry_dt.tzinfo is None:
+                    entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                days_held = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 86400
+            except Exception:
+                pass
+
+        trade = ResolvedTrade(
+            timestamp_resolved=datetime.now(timezone.utc).isoformat(),
+            market_id=pos.get("market_id", ""),
+            question=pos.get("question", ""),
+            category=pos.get("category", "UNKNOWN"),
+            side=pos.get("side", "YES"),
+            size_usdc=pos.get("size_usdc", 0.0),
+            entry_price=pos.get("entry_price", 0.0),
+            predicted_probability=pos.get("probability", 0.5),
+            actual_outcome=resolved_yes,
+            pnl=round(pnl, 4),
+            edge_at_entry=pos.get("edge", 0.0),
+            confidence=pos.get("confidence", "MEDIUM"),
+            evidence_quality=pos.get("evidence_quality", 0.5),
+            days_held=round(days_held, 2),
+            cross_ref_metaculus=pos.get("cross_ref_metaculus"),
+            cross_ref_manifold=pos.get("cross_ref_manifold"),
+        )
+        record_resolved_trade(trade)
+        logger.info(
+            "Evaluator: recorded resolved trade for %s (outcome=%s pnl=%.2f)",
+            pos.get("market_id"), resolved_yes, pnl,
+        )
+    except Exception as exc:
+        logger.warning("Failed to record resolved trade to evaluator: %s", exc)
+
+
 def monitor_open_positions() -> list[dict]:
     """
     Check open positions for stop-loss triggers and time-based exits.
-    Returns list of closed position records.
+
+    Time-exits: polls Gamma API for real resolution before closing.
+    If market not yet resolved, position stays open for the next cycle —
+    no more forced 100% loss assumption on every time-exit.
+
+    Stop-loss: checks live CLOB price in both paper and live modes.
+
+    Returns list of closed position dicts, each including resolved_yes and
+    predicted_prob for Telegram alert enrichment.
     """
     portfolio = _load_portfolio()
     open_positions: dict = portfolio.get("open_positions", {})
@@ -292,8 +355,10 @@ def monitor_open_positions() -> list[dict]:
     for market_id, pos in list(open_positions.items()):
         try:
             close_reason = None
+            exit_price = None
+            resolved_yes = None
 
-            # Time-based exit: close positions 4 hours before expiry
+            # Time-based exit: 4h before expiry
             now = datetime.now(timezone.utc)
             expiry_str = pos.get("expiry_time") or ""
             if expiry_str:
@@ -302,19 +367,42 @@ def monitor_open_positions() -> list[dict]:
                     expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
                 remaining_seconds = (expiry_dt - now).total_seconds()
                 if remaining_seconds < 4 * 3600:
-                    close_reason = "time_exit_4h_before_expiry"
+                    condition_id = pos.get("condition_id", "")
+                    if condition_id:
+                        resolved_yes = _fetch_resolution(condition_id)
+                    if resolved_yes is not None:
+                        close_reason = "time_exit_4h_before_expiry"
+                        # exit_price: 1.0 if we bet the winning side, 0.0 if we bet the loser
+                        won = (pos.get("side") == "YES") == resolved_yes
+                        exit_price = 1.0 if won else 0.0
+                    else:
+                        logger.info(
+                            "Position %s near expiry but not yet resolved — holding for next cycle.",
+                            market_id,
+                        )
 
-            # For paper trading, we can't check live price easily — rely on expiry
-            # In live mode: check current price vs stop-loss
-            live_price: float | None = None
-            if not IS_PAPER_TRADING and close_reason is None:
+            # Stop-loss: check live CLOB price in both paper and live modes
+            if close_reason is None:
                 live_price = _get_current_price(pos)
                 if live_price is not None and live_price < pos.get("stop_loss_price", 0):
                     close_reason = f"stop_loss_triggered (price={live_price:.3f})"
+                    exit_price = live_price
 
             if close_reason:
-                pnl = _close_position(portfolio, market_id, pos, close_reason, exit_price=live_price)
-                closed.append({"market_id": market_id, "question": pos["question"], "pnl": pnl, "reason": close_reason})
+                pnl = _close_position(portfolio, market_id, pos, close_reason, exit_price=exit_price)
+
+                if resolved_yes is not None:
+                    _record_to_evaluator(pos, pnl, resolved_yes)
+
+                closed.append({
+                    "market_id": market_id,
+                    "question": pos["question"],
+                    "side": pos.get("side"),
+                    "pnl": pnl,
+                    "reason": close_reason,
+                    "resolved_yes": resolved_yes,
+                    "predicted_prob": pos.get("probability"),
+                })
                 logger.info("Closed position %s: reason=%s pnl=%.2f", market_id, close_reason, pnl)
 
         except Exception as exc:
@@ -327,7 +415,7 @@ def monitor_open_positions() -> list[dict]:
 
 
 def _get_current_price(pos: dict) -> float | None:
-    """Fetch current market price for a live position."""
+    """Fetch current market price via CLOB API. Works in both paper and live modes."""
     try:
         import requests
         token_ids = pos.get("token_ids") or []
@@ -352,25 +440,29 @@ def _get_current_price(pos: dict) -> float | None:
         return None
 
 
-def _close_position(portfolio: dict, market_id: str, pos: dict, reason: str, exit_price: float | None = None) -> float:
-    """Remove position from portfolio and calculate P&L.
+def _close_position(
+    portfolio: dict,
+    market_id: str,
+    pos: dict,
+    reason: str,
+    exit_price: float | None = None,
+) -> float:
+    """
+    Remove position from portfolio and calculate P&L.
 
-    exit_price should be passed in for live mode (fetched from CLOB API).
-    For paper mode, time-exits assume 0 (full loss) since we cannot know the outcome;
-    stop-loss exits use the stop-loss price.
+    exit_price = 1.0 (win) or 0.0 (loss) for time-exits with confirmed resolution.
+    exit_price = live CLOB price for stop-loss exits.
+    Fallback if neither: conservative 0.0 (full loss assumption).
     """
     entry_price = pos.get("entry_price", 0)
     shares = pos.get("shares", 0)
     size_usdc = pos.get("size_usdc", 0)
 
     if exit_price is None:
-        # Paper mode: conservative assumption — treat time-exits as full loss
-        # This keeps drawdown tracking honest; actual winners will be reflected
-        # only when real resolution data is available.
         if "stop_loss" in reason:
             exit_price = pos.get("stop_loss_price", 0.0)
         else:
-            exit_price = 0.0  # worst case for unknown paper exits
+            exit_price = 0.0  # conservative fallback
 
     pnl = (exit_price - entry_price) * shares
 

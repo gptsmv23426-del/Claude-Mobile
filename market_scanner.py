@@ -45,7 +45,6 @@ def _get_days_to_expiry(end_date_iso: str) -> float:
         return 0.0
 
 
-
 import time as _time
 import random as _random
 
@@ -76,7 +75,7 @@ def _get_with_backoff(url, params=None, max_retries=3, timeout=30):
 def scan_markets() -> List[MarketOpportunity]:
     """
     Fetch active markets from Polymarket Gamma API, apply filters, and return
-    up to 20 MarketOpportunity objects.
+    up to 20 MarketOpportunity objects sorted by cross-platform divergence.
     """
     import requests
 
@@ -87,7 +86,7 @@ def scan_markets() -> List[MarketOpportunity]:
         "closed": "false",
         "limit": 30,
         "order": "volume24hr",
-        "ascending": "true",
+        "ascending": "false",  # highest-volume markets first (bug fix: was "true")
     }
 
     try:
@@ -122,7 +121,6 @@ def scan_markets() -> List[MarketOpportunity]:
             if not (1 <= days_to_expiry <= 120):
                 continue
 
-            # Parse orderbook prices from tokens
             tokens = m.get("tokens") or []
             yes_price, no_price = None, None
             token_ids = []
@@ -145,7 +143,6 @@ def scan_markets() -> List[MarketOpportunity]:
             if yes_price <= 0 or yes_price >= 1:
                 continue
 
-            # Skip markets without a condition_id — live orders and CLOB history would fail
             condition_id = m.get("conditionId", "")
             if not condition_id:
                 logger.debug("Skipping market with missing conditionId: %s", m.get("question", "")[:60])
@@ -174,9 +171,6 @@ def scan_markets() -> List[MarketOpportunity]:
             logger.warning("Skipping malformed market entry: %s", exc)
             continue
 
-    # Enrich each opportunity with cross-platform prices and compute divergence.
-    # This identifies markets where multiple independent platforms disagree —
-    # the strongest available edge signal that requires no proprietary data.
     for opp in opportunities:
         prices = get_cross_platform_prices(opp.question)
         if prices:
@@ -185,8 +179,6 @@ def scan_markets() -> List[MarketOpportunity]:
                 max(abs(opp.yes_price - p) for p in prices.values()), 4
             )
 
-    # Sort by divergence descending: highest cross-platform disagreement first.
-    # Markets with zero divergence (no cross-platform match) sort to the bottom.
     opportunities.sort(key=lambda o: o.cross_platform_divergence, reverse=True)
 
     logger.info(

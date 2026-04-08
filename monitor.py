@@ -5,54 +5,12 @@ Uses requests.post() directly instead of python-telegram-bot library.
 Reason: python-telegram-bot>=20.0 is fully async — calling Bot methods
 synchronously returns a coroutine object and never sends. Direct HTTP
 is simpler, sync-safe, and has no library version concerns.
-
-PLANNED UPGRADES (do not implement until approved):
-
-Phase 4 — Weekly Calibration Report Alert
-  Add alert_calibration_report() function:
-    def alert_calibration_report(
-        brier_score: float,
-        win_rate: float,
-        n_trades: int,
-        worst_category: str,
-        best_category: str,
-        top_lesson: str,
-        threshold_changes: dict,
-    ) -> None:
-    Message format:
-      <b>WEEKLY CALIBRATION REPORT</b>
-      Trades evaluated: {n_trades}
-      Brier Score: {brier_score:.3f} (target <0.20)
-      Win Rate: {win_rate:.1%}
-      Best category: {best_category}
-      Worst category: {worst_category}
-      Sonnet lesson: {top_lesson}
-      Threshold changes: {threshold_changes}
-
-  Called from main.py on Config.WEEKLY_EVAL_DAY at the same 14:00 UTC schedule slot.
-
-Phase 4 — Outcome Resolution Alert
-  Add alert_trade_resolved() to replace alert_trade_exit() with richer data:
-    def alert_trade_resolved(
-        question: str,
-        side: str,
-        pnl: float,
-        predicted_prob: float,
-        actual_outcome: bool,
-        brier_contribution: float,
-    ) -> None:
-    Message format:
-      <b>TRADE RESOLVED</b>
-      Market: {question}
-      Side: {side} | Outcome: {"YES" if actual_outcome else "NO"}
-      Result: {"WIN" if pnl > 0 else "LOSS"} ${pnl:+.2f}
-      Predicted: {predicted_prob:.1%} | Actual: {"1.0" if actual_outcome else "0.0"}
-      Brier: {brier_contribution:.3f}
 """
 
 import html
 import logging
 from datetime import datetime
+from typing import Optional
 
 import requests
 
@@ -83,8 +41,16 @@ def _send(text: str) -> None:
         logger.error("Telegram send failed: %s", exc)
 
 
-def alert_trade_entry(question: str, side: str, amount: float, edge: float, confidence: str) -> None:
-    _send(
+def alert_trade_entry(
+    question: str,
+    side: str,
+    amount: float,
+    edge: float,
+    confidence: str,
+    critic_concern: Optional[str] = None,
+    critic_summary: Optional[str] = None,
+) -> None:
+    body = (
         f"<b>TRADE ENTRY</b>\n"
         f"Market: {html.escape(question)}\n"
         f"Side: {html.escape(side)}\n"
@@ -92,6 +58,11 @@ def alert_trade_entry(question: str, side: str, amount: float, edge: float, conf
         f"Edge: {edge:.4f}\n"
         f"Confidence: {html.escape(confidence)}"
     )
+    if critic_concern and critic_concern != "LOW":
+        body += f"\nCritic: {html.escape(critic_concern)}"
+        if critic_summary:
+            body += f" — {html.escape(critic_summary[:120])}"
+    _send(body)
 
 
 def alert_trade_exit(question: str, pnl: float) -> None:
@@ -99,8 +70,55 @@ def alert_trade_exit(question: str, pnl: float) -> None:
     _send(
         f"<b>TRADE EXIT</b>\n"
         f"Market: {html.escape(question)}\n"
-        f"P&L: ${pnl:+.2f}\n"
+        f"P&amp;L: ${pnl:+.2f}\n"
         f"Result: {result}"
+    )
+
+
+def alert_trade_resolved(
+    question: str,
+    side: str,
+    pnl: float,
+    predicted_prob: float,
+    actual_outcome: bool,
+    brier_contribution: float,
+) -> None:
+    """Richer resolution alert replacing alert_trade_exit for confirmed outcomes."""
+    result = "WIN" if pnl > 0 else "LOSS"
+    outcome_str = "YES" if actual_outcome else "NO"
+    actual_val = "1.0" if actual_outcome else "0.0"
+    _send(
+        f"<b>TRADE RESOLVED</b>\n"
+        f"Market: {html.escape(question)}\n"
+        f"Side: {html.escape(side)} | Outcome: {outcome_str}\n"
+        f"Result: {result} ${pnl:+.2f}\n"
+        f"Predicted: {predicted_prob:.1%} | Actual: {actual_val}\n"
+        f"Brier: {brier_contribution:.3f}"
+    )
+
+
+def alert_calibration_report(
+    brier_score: float,
+    win_rate: float,
+    n_trades: int,
+    worst_category: str,
+    best_category: str,
+    top_lesson: str,
+    threshold_changes: dict,
+) -> None:
+    """Weekly calibration report to Telegram. Called from main._run_weekly_evaluation()."""
+    changes_str = ", ".join(
+        f"{k}: {v}" for k, v in threshold_changes.items() if v
+    ) or "none"
+    _send(
+        f"<b>WEEKLY CALIBRATION REPORT</b>\n"
+        f"Trades evaluated: {n_trades}\n"
+        f"Brier Score: {brier_score:.3f} (target &lt;0.20)\n"
+        f"Win Rate: {win_rate:.1%}\n"
+        f"Best category: {html.escape(best_category)}\n"
+        f"Worst category: {html.escape(worst_category)}\n"
+        f"Sonnet lesson: {html.escape(top_lesson[:200])}\n"
+        f"Threshold changes: {html.escape(changes_str)}"
     )
 
 
@@ -111,7 +129,7 @@ def alert_daily_summary(n_trades: int, wins: int, pnl: float, balance: float) ->
         f"Date: {date_str}\n"
         f"Trades: {n_trades}\n"
         f"Wins: {wins}\n"
-        f"P&L: ${pnl:+.2f}\n"
+        f"P&amp;L: ${pnl:+.2f}\n"
         f"Balance: ${balance:.2f}"
     )
 
