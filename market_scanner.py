@@ -1,7 +1,8 @@
 """
-Market scanner — connects to Polymarket CLOB API and returns filtered opportunities.
+Market scanner — connects to Polymarket Gamma API and returns filtered opportunities.
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Dict, List
@@ -14,9 +15,8 @@ from cross_platform import get_cross_platform_prices
 
 logger = logging.getLogger(__name__)
 
-from config import Config as _cfg
-GAMMA_API_BASE = _cfg.GAMMA_API_BASE
-CLOB_API_BASE = _cfg.CLOB_API_BASE
+GAMMA_API_BASE = Config.GAMMA_API_BASE
+CLOB_API_BASE = Config.CLOB_API_BASE
 
 
 class MarketOpportunity(BaseModel):
@@ -45,8 +45,36 @@ def _get_days_to_expiry(end_date_iso: str) -> float:
         return 0.0
 
 
+def _infer_category(question: str) -> str:
+    """
+    Infer market category from question text.
+    The Gamma API no longer returns a category field, so we derive it from keywords.
+    """
+    q = question.lower()
+    if any(w in q for w in ["bitcoin", "btc", "eth", "ethereum", "crypto", "solana", "sol", "coin", "token", "blockchain", "defi"]):
+        return "CRYPTO"
+    if any(w in q for w in ["nba", "nfl", "nhl", "mlb", " vs ", "vs.", "celtics", "lakers", "warriors", "knicks",
+                             "yankees", "dodgers", "oilers", "bucks", "hornets", "nets", "heat", "bulls",
+                             "championship", "super bowl", "world cup", "playoff", "tournament", "soccer",
+                             "football", "basketball", "baseball", "hockey", "tennis", "golf", "ufc", "boxing"]):
+        return "SPORTS"
+    if any(w in q for w in ["fed", "federal reserve", "inflation", "cpi", "gdp", "interest rate",
+                             "unemployment", "recession", "economy", "treasury", "debt ceiling",
+                             "tariff", "trade war", "s&p", "nasdaq", "dow", "stock market"]):
+        return "MACRO"
+    if any(w in q for w in ["ai", "openai", "chatgpt", "gpt", "apple", "google", "microsoft", "meta",
+                             "tesla", "amazon", "nvidia", "technology", "tech", "iphone", "android"]):
+        return "TECHNOLOGY"
+    if any(w in q for w in ["fda", "drug", "vaccine", "clinical", "cancer", "science", "nasa",
+                             "space", "climate", "research", "study", "medical"]):
+        return "SCIENCE"
+    # Default: geopolitical/political questions
+    return "POLITICS"
+
+
 import time as _time
 import random as _random
+
 
 def _get_with_backoff(url, params=None, max_retries=3, timeout=30):
     """GET with exponential backoff on 429 / transient errors."""
@@ -57,7 +85,7 @@ def _get_with_backoff(url, params=None, max_retries=3, timeout=30):
             resp = requests.get(url, params=params, timeout=timeout)
             if resp.status_code == 429:
                 wait = delay + _random.uniform(0, delay * 0.5)
-                logger.warning("Rate limited (%s). Retrying in %.1fs (attempt %d/%d)", url, wait, attempt + 1, max_retries)
+                logger.warning("Rate limited. Retrying in %.1fs (attempt %d/%d)", wait, attempt + 1, max_retries)
                 _time.sleep(wait)
                 delay *= 2
                 continue
@@ -67,18 +95,17 @@ def _get_with_backoff(url, params=None, max_retries=3, timeout=30):
             if attempt == max_retries - 1:
                 raise
             wait = delay + _random.uniform(0, delay * 0.5)
-            logger.warning("Request failed (%s): %s. Retrying in %.1fs", url, exc, wait)
+            logger.warning("Request failed: %s. Retrying in %.1fs", exc, wait)
             _time.sleep(wait)
             delay *= 2
     raise RuntimeError(f"Max retries exceeded for {url}")
+
 
 def scan_markets() -> List[MarketOpportunity]:
     """
     Fetch active markets from Polymarket Gamma API, apply filters, and return
     up to 20 MarketOpportunity objects sorted by cross-platform divergence.
     """
-    import requests
-
     opportunities: List[MarketOpportunity] = []
 
     params = {
@@ -86,12 +113,11 @@ def scan_markets() -> List[MarketOpportunity]:
         "closed": "false",
         "limit": 30,
         "order": "volume24hr",
-        "ascending": "false",  # highest-volume markets first (bug fix: was "true")
+        "ascending": "false",
     }
 
     try:
         resp = _get_with_backoff(f"{GAMMA_API_BASE}/markets", params=params)
-        resp.raise_for_status()
         markets = resp.json()
     except Exception as exc:
         logger.error("Failed to fetch markets from Gamma API: %s", exc)
@@ -106,7 +132,10 @@ def scan_markets() -> List[MarketOpportunity]:
             break
 
         try:
-            category = (m.get("category") or "UNKNOWN").upper()
+            # Infer category since Gamma API no longer returns it
+            question = m.get("question", "")
+            category = _infer_category(question)
+
             if category in Config.SKIP_CATEGORIES:
                 continue
             if category not in Config.PREFERRED_CATEGORIES:
@@ -116,45 +145,43 @@ def scan_markets() -> List[MarketOpportunity]:
             if volume < Config.MIN_MARKET_VOLUME_USD:
                 continue
 
-            end_date = m.get("endDate") or m.get("end_date_iso") or ""
+            end_date = m.get("endDateIso") or m.get("endDate") or ""
             days_to_expiry = _get_days_to_expiry(end_date)
             if not (1 <= days_to_expiry <= 120):
                 continue
 
-            tokens = m.get("tokens") or []
-            yes_price, no_price = None, None
-            token_ids = []
-            for token in tokens:
-                outcome = (token.get("outcome") or "").upper()
-                price = float(token.get("price", 0) or 0)
-                token_ids.append(token.get("token_id", ""))
-                if outcome == "YES":
-                    yes_price = price
-                elif outcome == "NO":
-                    no_price = price
-
-            if yes_price is None or no_price is None:
-                logger.debug(
-                    "Skipping market %s: missing YES or NO token price in API response.",
-                    m.get("id", ""),
-                )
+            condition_id = m.get("conditionId", "")
+            if not condition_id:
+                logger.debug("Skipping market with missing conditionId: %s", question[:60])
                 continue
+
+            # Parse prices from outcomePrices array (Gamma API current format)
+            # outcomePrices: ["yes_price", "no_price"] as strings
+            raw_prices = m.get("outcomePrices") or []
+            if isinstance(raw_prices, str):
+                raw_prices = json.loads(raw_prices)
+            if len(raw_prices) < 2:
+                continue
+            yes_price = float(raw_prices[0])
+            no_price = float(raw_prices[1])
 
             if yes_price <= 0 or yes_price >= 1:
                 continue
 
-            condition_id = m.get("conditionId", "")
-            if not condition_id:
-                logger.debug("Skipping market with missing conditionId: %s", m.get("question", "")[:60])
-                continue
+            # Parse token IDs from clobTokenIds (Gamma API current format)
+            raw_token_ids = m.get("clobTokenIds") or []
+            if isinstance(raw_token_ids, str):
+                raw_token_ids = json.loads(raw_token_ids)
+            token_ids = list(raw_token_ids)
 
-            spread = abs(1.0 - yes_price - no_price)
+            # Use spread from API directly if available, otherwise compute
+            spread = float(m.get("spread") or abs(1.0 - yes_price - no_price))
             if spread > Config.MAX_SPREAD:
                 continue
 
             opp = MarketOpportunity(
                 market_id=str(m.get("id", "")),
-                question=m.get("question", ""),
+                question=question,
                 category=category,
                 yes_price=yes_price,
                 no_price=no_price,
@@ -165,12 +192,13 @@ def scan_markets() -> List[MarketOpportunity]:
                 token_ids=token_ids,
             )
             opportunities.append(opp)
-            logger.debug("Accepted market: %s (vol=%.0f, spread=%.3f)", opp.question[:60], volume, spread)
+            logger.debug("Accepted: %s [%s] vol=$%.0f spread=%.3f", question[:60], category, volume, spread)
 
         except Exception as exc:
             logger.warning("Skipping malformed market entry: %s", exc)
             continue
 
+    # Enrich with cross-platform prices and compute divergence
     for opp in opportunities:
         prices = get_cross_platform_prices(opp.question)
         if prices:
@@ -179,6 +207,7 @@ def scan_markets() -> List[MarketOpportunity]:
                 max(abs(opp.yes_price - p) for p in prices.values()), 4
             )
 
+    # Sort by divergence descending: highest cross-platform disagreement first
     opportunities.sort(key=lambda o: o.cross_platform_divergence, reverse=True)
 
     logger.info(
