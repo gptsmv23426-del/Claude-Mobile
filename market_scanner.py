@@ -35,8 +35,13 @@ class MarketOpportunity(BaseModel):
 
 
 def _get_days_to_expiry(end_date_iso: str) -> float:
-    """Return days remaining until market expiry from an ISO timestamp string."""
+    """Return days remaining until market expiry. Handles both date-only and full ISO strings."""
     try:
+        if not end_date_iso:
+            return 0.0
+        # If date-only string (no T), append midnight UTC so fromisoformat gets timezone-aware dt
+        if "T" not in end_date_iso:
+            end_date_iso = end_date_iso + "T00:00:00Z"
         end_dt = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
         now = datetime.now(timezone.utc)
         delta = end_dt - now
@@ -51,24 +56,26 @@ def _infer_category(question: str) -> str:
     The Gamma API no longer returns a category field, so we derive it from keywords.
     """
     q = question.lower()
-    if any(w in q for w in ["bitcoin", "btc", "eth", "ethereum", "crypto", "solana", "sol", "coin", "token", "blockchain", "defi"]):
+    if any(w in q for w in ["bitcoin", "btc", "eth", "ethereum", "crypto", "solana", "sol",
+                             "coin", "token", "blockchain", "defi"]):
         return "CRYPTO"
-    if any(w in q for w in ["nba", "nfl", "nhl", "mlb", " vs ", "vs.", "celtics", "lakers", "warriors", "knicks",
-                             "yankees", "dodgers", "oilers", "bucks", "hornets", "nets", "heat", "bulls",
-                             "championship", "super bowl", "world cup", "playoff", "tournament", "soccer",
-                             "football", "basketball", "baseball", "hockey", "tennis", "golf", "ufc", "boxing"]):
+    if any(w in q for w in ["nba", "nfl", "nhl", "mlb", " vs ", "vs.", "celtics", "lakers",
+                             "warriors", "knicks", "yankees", "dodgers", "oilers", "bucks",
+                             "hornets", "nets", "heat", "bulls", "championship", "super bowl",
+                             "world cup", "playoff", "tournament", "soccer", "football",
+                             "basketball", "baseball", "hockey", "tennis", "golf", "ufc", "boxing"]):
         return "SPORTS"
     if any(w in q for w in ["fed", "federal reserve", "inflation", "cpi", "gdp", "interest rate",
                              "unemployment", "recession", "economy", "treasury", "debt ceiling",
                              "tariff", "trade war", "s&p", "nasdaq", "dow", "stock market"]):
         return "MACRO"
-    if any(w in q for w in ["ai", "openai", "chatgpt", "gpt", "apple", "google", "microsoft", "meta",
-                             "tesla", "amazon", "nvidia", "technology", "tech", "iphone", "android"]):
+    if any(w in q for w in ["ai", "openai", "chatgpt", "gpt", "apple", "google", "microsoft",
+                             "meta", "tesla", "amazon", "nvidia", "technology", "tech",
+                             "iphone", "android"]):
         return "TECHNOLOGY"
     if any(w in q for w in ["fda", "drug", "vaccine", "clinical", "cancer", "science", "nasa",
                              "space", "climate", "research", "study", "medical"]):
         return "SCIENCE"
-    # Default: geopolitical/political questions
     return "POLITICS"
 
 
@@ -132,7 +139,6 @@ def scan_markets() -> List[MarketOpportunity]:
             break
 
         try:
-            # Infer category since Gamma API no longer returns it
             question = m.get("question", "")
             category = _infer_category(question)
 
@@ -145,7 +151,8 @@ def scan_markets() -> List[MarketOpportunity]:
             if volume < Config.MIN_MARKET_VOLUME_USD:
                 continue
 
-            end_date = m.get("endDateIso") or m.get("endDate") or ""
+            # Prefer endDate (full datetime with Z) over endDateIso (date-only)
+            end_date = m.get("endDate") or m.get("endDateIso") or ""
             days_to_expiry = _get_days_to_expiry(end_date)
             if not (1 <= days_to_expiry <= 120):
                 continue
@@ -156,7 +163,6 @@ def scan_markets() -> List[MarketOpportunity]:
                 continue
 
             # Parse prices from outcomePrices array (Gamma API current format)
-            # outcomePrices: ["yes_price", "no_price"] as strings
             raw_prices = m.get("outcomePrices") or []
             if isinstance(raw_prices, str):
                 raw_prices = json.loads(raw_prices)
@@ -174,7 +180,6 @@ def scan_markets() -> List[MarketOpportunity]:
                 raw_token_ids = json.loads(raw_token_ids)
             token_ids = list(raw_token_ids)
 
-            # Use spread from API directly if available, otherwise compute
             spread = float(m.get("spread") or abs(1.0 - yes_price - no_price))
             if spread > Config.MAX_SPREAD:
                 continue
@@ -207,7 +212,6 @@ def scan_markets() -> List[MarketOpportunity]:
                 max(abs(opp.yes_price - p) for p in prices.values()), 4
             )
 
-    # Sort by divergence descending: highest cross-platform disagreement first
     opportunities.sort(key=lambda o: o.cross_platform_divergence, reverse=True)
 
     logger.info(
