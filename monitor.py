@@ -167,6 +167,16 @@ def alert_startup(paper_trading: bool, balance: float) -> None:
     )
 
 
+def alert_heartbeat_missed(minutes_ago: int) -> None:
+    """Sent when the bot's main loop is alive but no trading cycle has completed recently."""
+    _send(
+        f"<b>HEARTBEAT MISSED</b>\n"
+        f"Last completed cycle was {minutes_ago} min ago.\n"
+        f"Bot process is alive but cycle may be stalled.\n"
+        f"Check terminal logs."
+    )
+
+
 def send_test_message() -> None:
     """Send a test message to verify Telegram integration is working."""
     _send("<b>TEST MESSAGE</b>\nPolymarket bot Telegram integration is working.")

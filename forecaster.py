@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import statistics
+import time
 from typing import Dict, Literal, Optional, Tuple
 
 import anthropic
@@ -292,9 +293,12 @@ def forecast_market(research: ResearchResult) -> ForecastResult | None:
 def forecast_markets(research_results: list[ResearchResult]) -> list[ForecastResult]:
     """Forecast all researched markets."""
     results = []
-    for research in research_results:
+    for i, research in enumerate(research_results):
         result = forecast_market(research)
         if result:
             results.append(result)
+        # Delay between calls to avoid burst rate limiting (429s)
+        if i < len(research_results) - 1:
+            time.sleep(Config.API_CALL_DELAY_SECONDS)
     logger.info("Forecasting complete: %d forecasts produced.", len(results))
     return results

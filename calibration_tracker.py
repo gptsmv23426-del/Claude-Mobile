@@ -117,7 +117,7 @@ def check_and_update_resolutions() -> int:
     try:
         resp = requests.get(
             f"{GAMMA_API_BASE}/markets",
-            params={"closed": "true", "limit": 500, "order": "end_date_iso", "ascending": "false"},
+            params={"closed": "true", "limit": 500, "order": "volume24hr", "ascending": "false"},
             timeout=30,
         )
         resp.raise_for_status()
@@ -134,16 +134,18 @@ def check_and_update_resolutions() -> int:
         mid = str(m.get("id", ""))
         if mid not in pending_ids:
             continue
-        tokens = m.get("tokens") or []
-        for t in tokens:
-            if (t.get("outcome") or "").upper() == "YES":
-                price = float(t.get("price") or -1)
-                if price >= 0.99:
+        # Gamma API now uses outcomePrices[0]=YES, outcomePrices[1]=NO
+        outcome_prices = m.get("outcomePrices") or []
+        if len(outcome_prices) >= 1:
+            try:
+                yes_price = float(outcome_prices[0])
+                if yes_price >= 0.99:
                     resolutions[mid] = True
-                elif price <= 0.01:
+                elif yes_price <= 0.01:
                     resolutions[mid] = False
-                # If price is between 0.01 and 0.99, market may not be fully settled
-                break
+                # If between 0.01 and 0.99, market may not be fully settled
+            except (ValueError, TypeError):
+                pass
 
     updated = 0
     for entry in entries:

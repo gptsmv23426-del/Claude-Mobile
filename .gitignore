@@ -1,8 +1,10 @@
 .env
 __pycache__/
 *.pyc
-logs/*.log
+logs/
 *.egg-info/
 dist/
 .venv/
 venv/
+.claude/
+debug_scan.py

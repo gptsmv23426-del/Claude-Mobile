@@ -27,6 +27,7 @@ from monitor import (
     alert_daily_summary,
     alert_error,
     alert_drawdown_gate,
+    alert_heartbeat_missed,
 )
 from backtester import run_backtest, backtest_already_run
 from calibration_tracker import log_forecast, check_and_update_resolutions
@@ -119,6 +120,14 @@ def _run_trading_cycle() -> None:
     if not opportunities:
         logger.info("No qualifying markets found this cycle.")
         return
+
+    # Cap markets per cycle to stay within Anthropic rate limits
+    if len(opportunities) > Config.MAX_MARKETS_PER_CYCLE:
+        logger.info(
+            "Capping cycle to %d markets (found %d) to avoid rate limiting.",
+            Config.MAX_MARKETS_PER_CYCLE, len(opportunities),
+        )
+        opportunities = opportunities[:Config.MAX_MARKETS_PER_CYCLE]
 
     # Step 2: Research
     research_results = research_markets(opportunities)
@@ -232,7 +241,34 @@ def main() -> None:
         Config.SCAN_INTERVAL_MINUTES,
     )
 
+    _heartbeat_file = "logs/last_heartbeat.txt"
+    _heartbeat_alerted = False
+
+    def _write_heartbeat() -> None:
+        try:
+            with open(_heartbeat_file, "w") as f:
+                f.write(str(time.time()))
+        except Exception:
+            pass
+
+    def _check_heartbeat() -> None:
+        nonlocal _heartbeat_alerted
+        try:
+            with open(_heartbeat_file) as f:
+                last_ts = float(f.read().strip())
+            elapsed_min = (time.time() - last_ts) / 60
+            threshold = Config.SCAN_INTERVAL_MINUTES * 2
+            if elapsed_min > threshold:
+                if not _heartbeat_alerted:
+                    alert_heartbeat_missed(int(elapsed_min))
+                    _heartbeat_alerted = True
+            else:
+                _heartbeat_alerted = False
+        except Exception:
+            pass
+
     _run_trading_cycle()  # Run once immediately on startup
+    _write_heartbeat()
 
     next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
@@ -240,9 +276,11 @@ def main() -> None:
         try:
             schedule.run_pending()
             time.sleep(30)
+            _check_heartbeat()
 
             if time.time() >= next_cycle_time:
                 _run_trading_cycle()
+                _write_heartbeat()
                 next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
         except KeyboardInterrupt:

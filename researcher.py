@@ -12,6 +12,7 @@ Phase 4 (future): inject calibration feedback from evaluator.get_calibration_sum
 """
 
 import logging
+import time
 from typing import Dict, List
 
 import anthropic
@@ -143,18 +144,40 @@ KEY_FACTS:
 
         for line in text.splitlines():
             line = line.strip()
-            if line.startswith("EVIDENCE_QUALITY:"):
+            # Strip markdown bold/italic markers so **SUMMARY:** matches
+            line_clean = line.replace("**", "").replace("__", "")
+            line_upper = line_clean.upper()
+            if line_upper.startswith("EVIDENCE_QUALITY:"):
                 try:
-                    evidence_quality = float(line.split(":", 1)[1].strip())
+                    evidence_quality = float(line_clean.split(":", 1)[1].strip())
                     evidence_quality = max(0.0, min(1.0, evidence_quality))
                 except ValueError:
                     pass
-            elif line.startswith("SUMMARY:"):
-                summary = line.split(":", 1)[1].strip()
+            elif line_upper.startswith("SUMMARY:"):
+                summary = line_clean.split(":", 1)[1].strip()
             elif line.startswith("- ") and summary:
                 key_facts.append(line[2:].strip())
 
         if not summary:
+            # Fallback: use the first substantive paragraph regardless of evidence_quality
+            if True:
+                for line in text.splitlines():
+                    stripped = line.strip()
+                    if (
+                        len(stripped) > 60
+                        and not stripped.upper().startswith("EVIDENCE_QUALITY")
+                        and not stripped.upper().startswith("KEY_FACTS")
+                        and not stripped.startswith("-")
+                    ):
+                        summary = stripped[:500]
+                        logger.debug(
+                            "Used paragraph fallback for SUMMARY (market %s): %s",
+                            market.market_id, summary[:80],
+                        )
+                        break
+
+        if not summary:
+            logger.debug("Raw response snippet: %s", text[:300])
             logger.warning(
                 "No SUMMARY line in research response for market %s — discarding result.",
                 market.market_id,
@@ -195,10 +218,13 @@ KEY_FACTS:
 def research_markets(markets: List[MarketOpportunity]) -> List[ResearchResult]:
     """Research all markets and return those that pass the evidence quality threshold."""
     results = []
-    for market in markets:
+    for i, market in enumerate(markets):
         logger.info("Researching: %s", market.question[:60])
         result = research_market(market)
         if result:
             results.append(result)
+        # Delay between calls to avoid burst rate limiting (429s)
+        if i < len(markets) - 1:
+            time.sleep(Config.API_CALL_DELAY_SECONDS)
     logger.info("Research complete: %d/%d markets passed evidence threshold.", len(results), len(markets))
     return results

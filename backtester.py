@@ -44,6 +44,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import hashlib as _hl
 import numpy as np
 import pandas as pd
 import requests
@@ -101,7 +102,7 @@ def _fetch_resolved_markets(days: int = 90) -> list[dict]:
     params = {
         "closed": "true",
         "limit": 500,
-        "order": "end_date_iso",
+        "order": "volume24hr",
         "ascending": "false",
     }
     try:
@@ -183,29 +184,37 @@ def _fetch_clob_history(condition_id: str) -> Optional[list[dict]]:
         return None
 
 
+def _normalize_ts(t) -> float:
+    """Convert a timestamp to seconds. CLOB API returns milliseconds (>1e12)."""
+    t = float(t)
+    if t > 1e12:
+        return t / 1000.0
+    return t
+
+
 def _pick_entry_price(history: list[dict], end_ts: float) -> Optional[float]:
     """
     Pick a realistic entry price from the price history.
 
-    Strategy: find the price point at ~33% of the market's observable lifetime,
-    but at least 4 days before resolution (to avoid near-certain prices).
-    Only accept prices in [0.10, 0.90] — outside this range there is no edge.
+    Strategy: find all prices at least 1 day before resolution that fall in the
+    tradeable range [0.03, 0.97], then return the median of those prices.
+    Markets that never had a price in this range (always near 0 or 1) are skipped.
     """
     if not history:
         return None
 
-    four_days_s = 4 * 86400
-    candidates = [h for h in history if (end_ts - h["t"]) >= four_days_s]
-
+    one_day_s = 1 * 86400
+    candidates = [h for h in history if (end_ts - _normalize_ts(h["t"])) >= one_day_s]
     if not candidates:
         return None
 
-    idx = len(candidates) // 3
-    price = float(candidates[idx]["p"])
+    in_range = sorted(
+        float(h["p"]) for h in candidates if 0.03 <= float(h["p"]) <= 0.97
+    )
+    if not in_range:
+        return None
 
-    if 0.10 <= price <= 0.90:
-        return price
-    return None
+    return in_range[len(in_range) // 2]
 
 
 # ---------------------------------------------------------------------------
@@ -226,28 +235,40 @@ def _simulate_trades(markets: list[dict]) -> pd.DataFrame:
 
     Markets without a retrievable entry price are skipped rather than fabricated.
     """
+    from market_scanner import _infer_category  # Gamma API no longer returns category field
     records = []
     history_fetches = 0
+    n_skip_cat = n_skip_vol = n_skip_res = n_skip_history = n_skip_entry = n_skip_edge = 0
 
     for m in markets:
         try:
-            category = (m.get("category") or "UNKNOWN").upper()
+            question = m.get("question") or ""
+            category = _infer_category(question)
             if category in Config.SKIP_CATEGORIES:
+                n_skip_cat += 1
                 continue
             if category not in Config.PREFERRED_CATEGORIES:
+                n_skip_cat += 1
                 continue
 
             volume = float(m.get("volume", 0) or 0)
             if volume < Config.MIN_MARKET_VOLUME_USD:
+                n_skip_vol += 1
                 continue
 
             # Real resolution — no heuristic guessing
             yes_won = _parse_resolution(m)
             if yes_won is None:
-                logger.debug("Resolution unknown — skipping: %s", (m.get("question") or "")[:50])
+                n_skip_res += 1
+                logger.debug("Resolution unknown — skipping: %s", question[:50])
                 continue
 
             condition_id = m.get("conditionId", "")
+            # CLOB /prices-history expects a token_id, not conditionId
+            raw_clob_ids = m.get("clobTokenIds") or []
+            if isinstance(raw_clob_ids, str):
+                raw_clob_ids = json.loads(raw_clob_ids)
+            clob_token_id = raw_clob_ids[0] if raw_clob_ids else condition_id
             end_date_str = m.get("endDate") or m.get("end_date_iso") or ""
             end_ts: Optional[float] = None
             try:
@@ -258,22 +279,35 @@ def _simulate_trades(markets: list[dict]) -> pd.DataFrame:
 
             # Fetch real price history (capped to keep backtest fast)
             history = None
-            if condition_id and end_ts and history_fetches < _MAX_HISTORY_FETCHES:
-                history = _fetch_clob_history(condition_id)
+            if clob_token_id and end_ts and history_fetches < _MAX_HISTORY_FETCHES:
+                history = _fetch_clob_history(clob_token_id)
                 history_fetches += 1
                 time.sleep(_REQUEST_DELAY_S)
 
             if not history or end_ts is None:
+                n_skip_history += 1
                 continue  # Skip — no real entry price available
+
+            # Debug: log timestamp format for first market to confirm ms vs s
+            if history_fetches == 1 and history:
+                sample_t = history[0]["t"]
+                logger.info(
+                    "CLOB timestamp debug: h[t]=%s (type=%s), end_ts=%.0f, "
+                    "normalized=%.0f, delta=%.0f s",
+                    sample_t, type(sample_t).__name__, end_ts,
+                    _normalize_ts(sample_t), end_ts - _normalize_ts(sample_t),
+                )
 
             entry_price_yes = _pick_entry_price(history, end_ts)
             if entry_price_yes is None:
+                n_skip_entry += 1
                 continue
 
             # Edge = distance between entry price and actual outcome (0 or 1)
             true_yes_prob = 1.0 if yes_won else 0.0
             edge = abs(true_yes_prob - entry_price_yes)
             if edge < Config.MIN_EDGE_THRESHOLD:
+                n_skip_edge += 1
                 continue
 
             # Simulate forecast accuracy at 60% — conservative, reproducible per market
@@ -317,6 +351,11 @@ def _simulate_trades(markets: list[dict]) -> pd.DataFrame:
             logger.debug("Skipping market in backtest: %s", exc)
             continue
 
+    logger.info(
+        "Filter breakdown: %d skipped-category, %d skipped-volume, %d skipped-resolution, "
+        "%d skipped-history, %d skipped-entry-price, %d skipped-edge",
+        n_skip_cat, n_skip_vol, n_skip_res, n_skip_history, n_skip_entry, n_skip_edge,
+    )
     logger.info(
         "Simulation complete: %d trades from %d markets | %d CLOB history calls",
         len(records), len(markets), history_fetches,
