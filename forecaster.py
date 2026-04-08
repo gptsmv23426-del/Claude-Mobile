@@ -290,15 +290,17 @@ def forecast_market(research: ResearchResult) -> ForecastResult | None:
     return result
 
 
-def forecast_markets(research_results: list[ResearchResult]) -> list[ForecastResult]:
+def forecast_markets(research_results: list[ResearchResult], limiter=None) -> list[ForecastResult]:
     """Forecast all researched markets."""
     results = []
     for i, research in enumerate(research_results):
+        if limiter:
+            limiter.wait_if_needed(next_call_estimate=3_000)
         result = forecast_market(research)
         if result:
             results.append(result)
-        # Delay between calls — enforce 20s minimum to stay under 50k TPM limit
-        if i < len(research_results) - 1:
+        # Fallback delay if no limiter
+        if limiter is None and i < len(research_results) - 1:
             time.sleep(max(Config.API_CALL_DELAY_SECONDS, 20))
     logger.info("Forecasting complete: %d forecasts produced.", len(results))
     return results

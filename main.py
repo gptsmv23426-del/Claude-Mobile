@@ -32,6 +32,7 @@ from monitor import (
 )
 from backtester import run_backtest, backtest_already_run
 from calibration_tracker import log_forecast, check_and_update_resolutions
+from rate_limiter import TokenRateLimiter
 
 EVALUATED_CACHE_FILE = "logs/evaluated_markets.json"
 EVALUATED_COOLDOWN_CYCLES = 2  # skip a market for this many cycles after evaluating it
@@ -114,6 +115,7 @@ def _run_weekly_evaluation() -> None:
 
 def _run_trading_cycle() -> None:
     logger = logging.getLogger("main.cycle")
+    limiter = TokenRateLimiter(tokens_per_minute=Config.TPM_LIMIT)
 
     # Check drawdown gate before starting cycle
     paused, drawdown = check_drawdown_gate()
@@ -195,30 +197,27 @@ def _run_trading_cycle() -> None:
     _save_evaluated_cache(cache)
 
     # Step 2: Research
-    research_results = research_markets(opportunities)
+    research_results = research_markets(opportunities, limiter=limiter)
     if not research_results:
         logger.info("No markets passed research quality threshold.")
         return
 
-    # Phase gap: let the token-per-minute window reset before forecasting
-    logger.info("Pausing 30s before forecast phase...")
-    time.sleep(30)
+    # Phase gap: let rate limiter decide how long to wait
+    limiter.wait_if_needed(next_call_estimate=3_000)
 
     # Step 3: Forecast
-    forecasts = forecast_markets(research_results)
+    forecasts = forecast_markets(research_results, limiter=limiter)
     if not forecasts:
         logger.info("No forecasts produced.")
         return
 
-    # Phase gap: let the window reset before critic + execution loop
-    logger.info("Pausing 30s before critic/execution phase...")
-    time.sleep(30)
+    # Phase gap: let rate limiter decide how long to wait
+    limiter.wait_if_needed(next_call_estimate=2_000)
 
     # Step 4: Critic + risk check + execute
     for i, forecast in enumerate(forecasts):
-        # Delay between iterations (always, not just after first)
         if i > 0:
-            time.sleep(max(Config.API_CALL_DELAY_SECONDS, 20))
+            limiter.wait_if_needed(next_call_estimate=2_000)
 
         # Step 3.5: Devil's advocate critique
         critique = None

@@ -63,7 +63,7 @@ def _build_search_query(market: MarketOpportunity) -> str:
     return f"{market.question} {hint} latest news 2025 2026"
 
 
-def research_market(market: MarketOpportunity) -> ResearchResult | None:
+def research_market(market: MarketOpportunity, limiter=None) -> ResearchResult | None:
     """
     Research a single market using Claude Haiku with web search.
     Returns None if evidence quality is below threshold.
@@ -128,6 +128,9 @@ KEY_FACTS:
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": user_prompt}],
         )
+
+        if limiter:
+            limiter.record_from_response(response)
 
         text = ""
         for block in response.content:
@@ -215,17 +218,18 @@ KEY_FACTS:
         return None
 
 
-def research_markets(markets: List[MarketOpportunity]) -> List[ResearchResult]:
+def research_markets(markets: List[MarketOpportunity], limiter=None) -> List[ResearchResult]:
     """Research all markets and return those that pass the evidence quality threshold."""
     results = []
     for i, market in enumerate(markets):
+        if limiter:
+            limiter.wait_if_needed(next_call_estimate=10_000)
         logger.info("Researching: %s", market.question[:60])
-        result = research_market(market)
+        result = research_market(market, limiter=limiter)
         if result:
             results.append(result)
-        # Enforce a minimum 20s delay between research calls regardless of config,
-        # since each call uses ~5-10k tokens and the org limit is 50k tokens/minute.
-        if i < len(markets) - 1:
+        # Fallback delay if no limiter
+        if limiter is None and i < len(markets) - 1:
             time.sleep(max(Config.API_CALL_DELAY_SECONDS, 20))
     logger.info("Research complete: %d/%d markets passed evidence threshold.", len(results), len(markets))
     return results
