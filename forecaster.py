@@ -136,7 +136,7 @@ def _single_haiku_call(
         client = _get_client()
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=256,
+            max_tokens=512,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )

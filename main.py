@@ -3,11 +3,12 @@ Polymarket Autonomous Trading Bot
 Entry point and main loop.
 """
 
+import json
 import logging
 import os
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import schedule
 
@@ -31,6 +32,22 @@ from monitor import (
 )
 from backtester import run_backtest, backtest_already_run
 from calibration_tracker import log_forecast, check_and_update_resolutions
+
+EVALUATED_CACHE_FILE = "logs/evaluated_markets.json"
+EVALUATED_COOLDOWN_CYCLES = 2  # skip a market for this many cycles after evaluating it
+
+
+def _load_evaluated_cache() -> dict:
+    try:
+        with open(EVALUATED_CACHE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_evaluated_cache(cache: dict) -> None:
+    with open(EVALUATED_CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
 
 
 def _configure_logging() -> None:
@@ -121,13 +138,61 @@ def _run_trading_cycle() -> None:
         logger.info("No qualifying markets found this cycle.")
         return
 
-    # Cap markets per cycle to stay within Anthropic rate limits
-    if len(opportunities) > Config.MAX_MARKETS_PER_CYCLE:
+    # Filter out markets already held in open positions (avoid wasting research tokens)
+    try:
+        with open(Config.PAPER_PORTFOLIO_FILE) as f:
+            portfolio = json.load(f)
+        open_market_ids = set(portfolio.get("open_positions", {}).keys())
+    except (FileNotFoundError, json.JSONDecodeError):
+        open_market_ids = set()
+
+    opportunities = [o for o in opportunities if o.market_id not in open_market_ids]
+    if open_market_ids:
+        logger.info(f"Filtered {len(open_market_ids)} already-held markets before research.")
+
+    # Skip markets evaluated recently (within 2 cycle-lengths) to force rotation
+    evaluated_cache = _load_evaluated_cache()
+    cooldown_minutes = Config.SCAN_INTERVAL_MINUTES * EVALUATED_COOLDOWN_CYCLES
+    now = datetime.utcnow()
+
+    def _on_cooldown(market_id: str) -> bool:
+        if market_id not in evaluated_cache:
+            return False
+        last = datetime.fromisoformat(evaluated_cache[market_id])
+        return (now - last).total_seconds() < cooldown_minutes * 60
+
+    before = len(opportunities)
+    opportunities = [o for o in opportunities if not _on_cooldown(o.market_id)]
+    skipped = before - len(opportunities)
+    if skipped:
+        logger.info(f"Skipped {skipped} markets on evaluation cooldown.")
+
+    # Enforce category diversity and cap to stay within Anthropic rate limits
+    category_counts: dict = {}
+    diverse_opportunities = []
+    for opp in opportunities:
+        cat = opp.category
+        if category_counts.get(cat, 0) < Config.MAX_MARKETS_PER_CATEGORY:
+            diverse_opportunities.append(opp)
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+        if len(diverse_opportunities) >= Config.MAX_MARKETS_PER_CYCLE:
+            break
+    if len(diverse_opportunities) < len(opportunities):
         logger.info(
-            "Capping cycle to %d markets (found %d) to avoid rate limiting.",
-            Config.MAX_MARKETS_PER_CYCLE, len(opportunities),
+            "Capping cycle to %d diverse markets (found %d, max %d per category) to avoid rate limiting.",
+            len(diverse_opportunities), len(opportunities), Config.MAX_MARKETS_PER_CATEGORY,
         )
-        opportunities = opportunities[:Config.MAX_MARKETS_PER_CYCLE]
+    opportunities = diverse_opportunities
+
+    # Update evaluated cache for all markets about to be researched
+    now_iso = datetime.utcnow().isoformat()
+    cache = _load_evaluated_cache()
+    for opp in opportunities:
+        cache[opp.market_id] = now_iso
+    # Prune entries older than 7 days to prevent unbounded growth
+    cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    cache = {k: v for k, v in cache.items() if v > cutoff}
+    _save_evaluated_cache(cache)
 
     # Step 2: Research
     research_results = research_markets(opportunities)
@@ -142,7 +207,10 @@ def _run_trading_cycle() -> None:
         return
 
     # Step 4: Critic + risk check + execute
-    for forecast in forecasts:
+    for i, forecast in enumerate(forecasts):
+        # Delay between iterations to avoid rate limiting
+        if i > 0:
+            time.sleep(Config.API_CALL_DELAY_SECONDS)
 
         # Step 3.5: Devil's advocate critique
         critique = None

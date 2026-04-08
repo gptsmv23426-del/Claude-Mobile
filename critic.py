@@ -95,7 +95,7 @@ def challenge_forecast(forecast: ForecastResult) -> CritiqueResult:
 
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=256,
+            max_tokens=1024,
             system=_CRITIC_SYSTEM,
             messages=[{"role": "user", "content": user_prompt}],
         )

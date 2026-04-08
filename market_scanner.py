@@ -118,7 +118,7 @@ def scan_markets() -> List[MarketOpportunity]:
     params = {
         "active": "true",
         "closed": "false",
-        "limit": 30,
+        "limit": 100,
         "order": "volume24hr",
         "ascending": "false",
     }

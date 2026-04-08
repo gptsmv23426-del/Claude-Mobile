@@ -40,8 +40,9 @@ class Config:
     MAX_DRAWDOWN_GATE: float = float(os.environ.get("MAX_DRAWDOWN_GATE", "0.15"))
     KELLY_FRACTION: float = float(os.environ.get("KELLY_FRACTION", "0.25"))
     MIN_BACKTEST_SHARPE: float = float(os.environ.get("MIN_BACKTEST_SHARPE", "0.8"))
-    API_CALL_DELAY_SECONDS: float = float(os.environ.get("API_CALL_DELAY_SECONDS", "2.0"))
+    API_CALL_DELAY_SECONDS: float = float(os.environ.get("API_CALL_DELAY_SECONDS", "15.0"))
     MAX_MARKETS_PER_CYCLE: int = int(os.environ.get("MAX_MARKETS_PER_CYCLE", "5"))
+    MAX_MARKETS_PER_CATEGORY: int = int(os.environ.get("MAX_MARKETS_PER_CATEGORY", "2"))
 
     PREFERRED_CATEGORIES = {"CRYPTO", "MACRO", "TECHNOLOGY", "SCIENCE", "POLITICS"}
     SKIP_CATEGORIES = {"WEATHER", "SPORTS"}
