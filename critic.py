@@ -66,6 +66,75 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
+def _repair_json(text: str) -> dict:
+    """
+    Parse JSON from critic response, repairing common LLM output issues:
+    - Markdown fences
+    - Unescaped quotes inside string values
+    - Newlines inside strings
+    - Truncated output (max_tokens hit mid-string)
+
+    Returns parsed dict. Raises ValueError if repair fails.
+    """
+    import re
+
+    # Strip markdown fences
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    if text.endswith("```"):
+        text = text[:-3].strip()
+
+    # Try clean parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Fix 1: Escape literal newlines inside strings
+    text_fixed = text.replace("\n", "\\n").replace("\r", "\\r")
+    # Restore structural newlines (after { , } [ ] :)
+    for ch in ["{", "}", "[", "]", ",", ":"]:
+        text_fixed = text_fixed.replace(f"{ch}\\n", f"{ch}\n")
+        text_fixed = text_fixed.replace(f"\\n{ch}", f"\n{ch}")
+
+    try:
+        return json.loads(text_fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # Fix 2: If truncated, try to close it
+    truncated = text.rstrip()
+    open_braces = truncated.count("{") - truncated.count("}")
+    open_brackets = truncated.count("[") - truncated.count("]")
+
+    if open_braces > 0 or open_brackets > 0:
+        for end_char in [",", "}"]:
+            idx = truncated.rfind(end_char)
+            if idx > 0:
+                attempt = truncated[:idx]
+                attempt += "]" * open_brackets + "}" * open_braces
+                try:
+                    return json.loads(attempt)
+                except json.JSONDecodeError:
+                    continue
+
+    # Fix 3: Regex extraction — just get concern_level (minimum useful data)
+    concern_match = re.search(r'"concern_level"\s*:\s*"(LOW|MEDIUM|HIGH)"', text)
+    if concern_match:
+        return {
+            "concern_level": concern_match.group(1),
+            "counter_arguments": [],
+            "overconfidence_flag": False,
+            "rationale": "JSON repair: extracted concern_level only",
+        }
+
+    raise ValueError(f"Could not repair JSON: {text[:200]}")
+
+
 def challenge_forecast(forecast: ForecastResult) -> CritiqueResult:
     """
     Run the devil's advocate critique on a forecast.
@@ -101,13 +170,8 @@ def challenge_forecast(forecast: ForecastResult) -> CritiqueResult:
         )
 
         text = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        text = text.strip()
 
-        data = json.loads(text)
+        data = _repair_json(text)
         concern = str(data.get("concern_level", "LOW")).upper()
         if concern not in ("LOW", "MEDIUM", "HIGH"):
             concern = "LOW"
