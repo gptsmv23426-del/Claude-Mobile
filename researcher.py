@@ -223,8 +223,9 @@ def research_markets(markets: List[MarketOpportunity]) -> List[ResearchResult]:
         result = research_market(market)
         if result:
             results.append(result)
-        # Delay between calls to avoid burst rate limiting (429s)
+        # Enforce a minimum 20s delay between research calls regardless of config,
+        # since each call uses ~5-10k tokens and the org limit is 50k tokens/minute.
         if i < len(markets) - 1:
-            time.sleep(Config.API_CALL_DELAY_SECONDS)
+            time.sleep(max(Config.API_CALL_DELAY_SECONDS, 20))
     logger.info("Research complete: %d/%d markets passed evidence threshold.", len(results), len(markets))
     return results
