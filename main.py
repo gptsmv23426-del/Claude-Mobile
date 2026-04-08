@@ -196,6 +196,25 @@ def _run_trading_cycle() -> None:
     cache = {k: v for k, v in cache.items() if v > cutoff}
     _save_evaluated_cache(cache)
 
+    # Step 1.5: Pre-screen to avoid wasting research tokens on low-potential markets
+    if Config.PRE_SCREEN_ENABLED and len(opportunities) > 2:
+        from pre_screener import pre_screen_markets
+        screen_results, screen_response = pre_screen_markets(opportunities)
+        if screen_response:
+            limiter.record_from_response(screen_response)
+        tradeable_ids = {r.market_id for r in screen_results if r.tradeable}
+        before_screen = len(opportunities)
+        opportunities = [o for o in opportunities if o.market_id in tradeable_ids]
+        if len(opportunities) < before_screen:
+            logger.info(
+                "Pre-screen filtered %d/%d markets (saved ~%dk research tokens).",
+                before_screen - len(opportunities), before_screen,
+                (before_screen - len(opportunities)) * 8,
+            )
+        if not opportunities:
+            logger.info("No markets passed pre-screen.")
+            return
+
     # Step 2: Research
     research_results = research_markets(opportunities, limiter=limiter)
     if not research_results:
