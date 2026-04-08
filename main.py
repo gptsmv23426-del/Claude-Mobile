@@ -200,8 +200,9 @@ def _run_trading_cycle() -> None:
         logger.info("No markets passed research quality threshold.")
         return
 
-    # Pause before forecasting to avoid hitting token-per-minute rate limit
-    time.sleep(Config.API_CALL_DELAY_SECONDS)
+    # Phase gap: let the token-per-minute window reset before forecasting
+    logger.info("Pausing 30s before forecast phase...")
+    time.sleep(30)
 
     # Step 3: Forecast
     forecasts = forecast_markets(research_results)
@@ -209,11 +210,15 @@ def _run_trading_cycle() -> None:
         logger.info("No forecasts produced.")
         return
 
+    # Phase gap: let the window reset before critic + execution loop
+    logger.info("Pausing 30s before critic/execution phase...")
+    time.sleep(30)
+
     # Step 4: Critic + risk check + execute
     for i, forecast in enumerate(forecasts):
-        # Delay between iterations to avoid rate limiting
+        # Delay between iterations (always, not just after first)
         if i > 0:
-            time.sleep(Config.API_CALL_DELAY_SECONDS)
+            time.sleep(max(Config.API_CALL_DELAY_SECONDS, 20))
 
         # Step 3.5: Devil's advocate critique
         critique = None

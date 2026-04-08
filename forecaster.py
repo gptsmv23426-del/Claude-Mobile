@@ -297,8 +297,8 @@ def forecast_markets(research_results: list[ResearchResult]) -> list[ForecastRes
         result = forecast_market(research)
         if result:
             results.append(result)
-        # Delay between calls to avoid burst rate limiting (429s)
+        # Delay between calls — enforce 20s minimum to stay under 50k TPM limit
         if i < len(research_results) - 1:
-            time.sleep(Config.API_CALL_DELAY_SECONDS)
+            time.sleep(max(Config.API_CALL_DELAY_SECONDS, 20))
     logger.info("Forecasting complete: %d forecasts produced.", len(results))
     return results
