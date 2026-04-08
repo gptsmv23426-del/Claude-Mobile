@@ -34,6 +34,7 @@ from monitor import (
 from backtester import run_backtest, backtest_already_run
 from calibration_tracker import log_forecast, check_and_update_resolutions
 from rate_limiter import TokenRateLimiter
+from telegram_commands import poll_and_handle as telegram_poll, is_paused as telegram_is_paused
 
 EVALUATED_CACHE_FILE = "logs/evaluated_markets.json"
 EVALUATED_COOLDOWN_CYCLES = 2  # skip a market for this many cycles after evaluating it
@@ -399,15 +400,20 @@ def main() -> None:
     while True:
         try:
             schedule.run_pending()
+            telegram_poll()
             time.sleep(30)
             _check_heartbeat()
             _check_drought()
 
             if time.time() >= next_cycle_time:
-                _run_trading_cycle()
-                _write_heartbeat()
-                _cycle_count += 1
-                next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
+                if telegram_is_paused():
+                    logger.info("Trading paused via Telegram — skipping cycle.")
+                    next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
+                else:
+                    _run_trading_cycle()
+                    _write_heartbeat()
+                    _cycle_count += 1
+                    next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
         except KeyboardInterrupt:
             logger.info("Shutdown requested via keyboard interrupt.")
