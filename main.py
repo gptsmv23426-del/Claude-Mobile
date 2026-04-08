@@ -153,12 +153,12 @@ def _run_trading_cycle() -> None:
     # Skip markets evaluated recently (within 2 cycle-lengths) to force rotation
     evaluated_cache = _load_evaluated_cache()
     cooldown_minutes = Config.SCAN_INTERVAL_MINUTES * EVALUATED_COOLDOWN_CYCLES
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     def _on_cooldown(market_id: str) -> bool:
         if market_id not in evaluated_cache:
             return False
-        last = datetime.fromisoformat(evaluated_cache[market_id])
+        last = datetime.fromisoformat(evaluated_cache[market_id]).replace(tzinfo=None)
         return (now - last).total_seconds() < cooldown_minutes * 60
 
     before = len(opportunities)
