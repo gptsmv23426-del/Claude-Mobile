@@ -51,7 +51,8 @@ Your job is to find every reason this trade is wrong. Argue the opposite side.
 Look for: recency bias in the evidence, overconfident language, base rate neglect,
 missing context, resolution ambiguity, market manipulation, or illiquid spreads.
 Be terse and specific. Do not validate the trade — your role is adversarial.
-Output ONLY a JSON object. No preamble. No markdown. Raw JSON only.
+Output ONLY a JSON object. No preamble. No markdown fences. No text outside the JSON.
+Keep all string values on a single line — no newlines inside strings.
 JSON schema: {"concern_level": "LOW|MEDIUM|HIGH", "counter_arguments": ["...", "..."], "overconfidence_flag": true|false, "rationale": "..."}
 Definitions:
   LOW    — trade has minor issues but is defensible
