@@ -255,6 +255,40 @@ def _forecast_ensemble(research: ResearchResult, user_prompt: str) -> Optional[F
     return _build_forecast_result(research, final_prob, confidence, combined_rationale)
 
 
+def _consistency_check(result: ForecastResult) -> ForecastResult | None:
+    """
+    Verify the forecaster's reasoning direction matches its bet direction.
+    Uses a single cheap Haiku call (~200 tokens) to detect contradictions
+    like 'argues collapse is unlikely' + 'bets YES on collapse'.
+    Returns None if contradiction found (kills the forecast).
+    """
+    try:
+        client = _get_client()
+        check_prompt = (
+            f"A forecaster analyzed this market: '{result.question}'\n"
+            f"Their reasoning: {result.rationale[:500]}\n"
+            f"Their bet: {result.side} at probability {result.probability:.3f}\n\n"
+            f"Does the reasoning SUPPORT or CONTRADICT the bet direction? "
+            f"Answer exactly one word: SUPPORT or CONTRADICT"
+        )
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=10,
+            messages=[{"role": "user", "content": check_prompt}],
+        )
+        answer = "".join(b.text for b in response.content if hasattr(b, "text")).strip().upper()
+        if "CONTRADICT" in answer:
+            logger.warning(
+                "Consistency gate: reasoning contradicts bet for '%s' (side=%s, prob=%.3f) — dropping forecast",
+                result.question[:50], result.side, result.probability,
+            )
+            return None
+        return result
+    except Exception as exc:
+        logger.debug("Consistency check failed (non-fatal): %s — passing through", exc)
+        return result
+
+
 def forecast_market(research: ResearchResult) -> ForecastResult | None:
     """
     Produce a probability forecast for a single market.
@@ -269,6 +303,11 @@ def forecast_market(research: ResearchResult) -> ForecastResult | None:
     else:
         result = _forecast_single(research, user_prompt)
 
+    if result is None:
+        return None
+
+    # Consistency gate: verify reasoning direction matches bet direction
+    result = _consistency_check(result)
     if result is None:
         return None
 

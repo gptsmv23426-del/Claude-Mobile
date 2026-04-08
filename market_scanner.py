@@ -67,7 +67,9 @@ def _infer_category(question: str) -> str:
         return "SPORTS"
     if any(w in q for w in ["fed", "federal reserve", "inflation", "cpi", "gdp", "interest rate",
                              "unemployment", "recession", "economy", "treasury", "debt ceiling",
-                             "tariff", "trade war", "s&p", "nasdaq", "dow", "stock market"]):
+                             "tariff", "trade war", "s&p", "nasdaq", "dow", "stock market",
+                             "oil", "wti", "crude", "brent", "commodit", "gold", "silver",
+                             "natural gas", "opec"]):
         return "MACRO"
     if any(w in q for w in ["ai", "openai", "chatgpt", "gpt", "apple", "google", "microsoft",
                              "meta", "tesla", "amazon", "nvidia", "technology", "tech",
