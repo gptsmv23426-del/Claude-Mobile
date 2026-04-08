@@ -89,11 +89,11 @@ class ForecastResult(BaseModel):
 
 
 def _apply_calibration_penalty(probability: float, evidence_quality: float) -> float:
-    """Widen probability toward 0.5 when evidence quality is below 0.75."""
-    if evidence_quality >= 0.75:
+    """Widen probability toward 0.5 when evidence quality is below 0.60."""
+    if evidence_quality >= 0.60:
         return probability
-    penalty_factor = (0.75 - evidence_quality) / 0.75
-    shrinkage = penalty_factor * 0.5
+    penalty_factor = (0.60 - evidence_quality) / 0.60
+    shrinkage = penalty_factor * 0.35
     return probability * (1 - shrinkage) + 0.5 * shrinkage
 
 

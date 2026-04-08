@@ -118,9 +118,9 @@ def evaluate_trade(forecast: ForecastResult, critique=None) -> RiskDecision:
             )
     logger.debug("Check 6 PASS: drawdown within limits")
 
-    # Check 7: Days to expiry must be >= 2
-    if forecast.days_to_expiry < 2:
-        return block(f"Days to expiry {forecast.days_to_expiry:.1f} < 2")
+    # Check 7: Days to expiry must be >= 0.25 (6 hours) for short-term trades
+    if forecast.days_to_expiry < 0.25:
+        return block(f"Days to expiry {forecast.days_to_expiry:.1f} < 0.25")
     logger.debug("Check 7 PASS: days_to_expiry=%.1f", forecast.days_to_expiry)
 
     # Check 8: Market volume must be > MIN_MARKET_VOLUME_USD

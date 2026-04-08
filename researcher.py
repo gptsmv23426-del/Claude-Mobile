@@ -142,6 +142,7 @@ KEY_FACTS:
             return None
 
         evidence_quality = 0.0
+        eq_parsed = False
         summary = ""
         key_facts: List[str] = []
 
@@ -160,6 +161,7 @@ KEY_FACTS:
                     if match:
                         evidence_quality = float(match.group(1))
                         evidence_quality = max(0.0, min(1.0, evidence_quality))
+                        eq_parsed = True
                 except (ValueError, IndexError):
                     pass
             elif line_upper.startswith("SUMMARY:"):
@@ -167,23 +169,41 @@ KEY_FACTS:
             elif line.startswith("- ") and summary:
                 key_facts.append(line[2:].strip())
 
+        # If we couldn't parse evidence quality from the response, try a global
+        # regex sweep and fall back to 0.50 (neutral) instead of 0.0 (auto-reject)
+        if not eq_parsed:
+            import re
+            eq_match = re.search(
+                r"(?:evidence[_ ]?quality|quality[_ ]?score)\s*[:=]\s*(\d+\.?\d*)",
+                text, re.IGNORECASE,
+            )
+            if eq_match:
+                evidence_quality = max(0.0, min(1.0, float(eq_match.group(1))))
+                eq_parsed = True
+                logger.debug("Parsed evidence quality via regex fallback: %.2f", evidence_quality)
+            else:
+                evidence_quality = 0.50
+                logger.info(
+                    "Could not parse evidence quality for market %s — using neutral default 0.50",
+                    market.market_id,
+                )
+
         if not summary:
             # Fallback: use the first substantive paragraph regardless of evidence_quality
-            if True:
-                for line in text.splitlines():
-                    stripped = line.strip()
-                    if (
-                        len(stripped) > 60
-                        and not stripped.upper().startswith("EVIDENCE_QUALITY")
-                        and not stripped.upper().startswith("KEY_FACTS")
-                        and not stripped.startswith("-")
-                    ):
-                        summary = stripped[:500]
-                        logger.debug(
-                            "Used paragraph fallback for SUMMARY (market %s): %s",
-                            market.market_id, summary[:80],
-                        )
-                        break
+            for line in text.splitlines():
+                stripped = line.strip()
+                if (
+                    len(stripped) > 60
+                    and not stripped.upper().startswith("EVIDENCE_QUALITY")
+                    and not stripped.upper().startswith("KEY_FACTS")
+                    and not stripped.startswith("-")
+                ):
+                    summary = stripped[:500]
+                    logger.debug(
+                        "Used paragraph fallback for SUMMARY (market %s): %s",
+                        market.market_id, summary[:80],
+                    )
+                    break
 
         if not summary:
             logger.debug("Raw response snippet: %s", text[:300])
@@ -192,9 +212,6 @@ KEY_FACTS:
                 market.market_id,
             )
             return None
-
-        if evidence_quality == 0.0:
-            logger.debug("Evidence quality 0.0 — response text snippet: %s", text[:500])
 
         if evidence_quality < Config.MIN_EVIDENCE_QUALITY:
             logger.info(

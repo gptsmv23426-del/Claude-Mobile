@@ -156,7 +156,7 @@ def scan_markets() -> List[MarketOpportunity]:
             # Prefer endDate (full datetime with Z) over endDateIso (date-only)
             end_date = m.get("endDate") or m.get("endDateIso") or ""
             days_to_expiry = _get_days_to_expiry(end_date)
-            if not (1 <= days_to_expiry <= 120):
+            if not (0.25 <= days_to_expiry <= 120):
                 continue
 
             condition_id = m.get("conditionId", "")
