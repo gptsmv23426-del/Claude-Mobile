@@ -8,7 +8,7 @@ import logging
 import os
 import time
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import schedule
 
@@ -153,7 +153,7 @@ def _run_trading_cycle() -> None:
     # Skip markets evaluated recently (within 2 cycle-lengths) to force rotation
     evaluated_cache = _load_evaluated_cache()
     cooldown_minutes = Config.SCAN_INTERVAL_MINUTES * EVALUATED_COOLDOWN_CYCLES
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     def _on_cooldown(market_id: str) -> bool:
         if market_id not in evaluated_cache:
@@ -185,12 +185,12 @@ def _run_trading_cycle() -> None:
     opportunities = diverse_opportunities
 
     # Update evaluated cache for all markets about to be researched
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     cache = _load_evaluated_cache()
     for opp in opportunities:
         cache[opp.market_id] = now_iso
     # Prune entries older than 7 days to prevent unbounded growth
-    cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     cache = {k: v for k, v in cache.items() if v > cutoff}
     _save_evaluated_cache(cache)
 
@@ -199,6 +199,9 @@ def _run_trading_cycle() -> None:
     if not research_results:
         logger.info("No markets passed research quality threshold.")
         return
+
+    # Pause before forecasting to avoid hitting token-per-minute rate limit
+    time.sleep(Config.API_CALL_DELAY_SECONDS)
 
     # Step 3: Forecast
     forecasts = forecast_markets(research_results)
