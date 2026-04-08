@@ -177,6 +177,17 @@ def alert_heartbeat_missed(minutes_ago: int) -> None:
     )
 
 
+def alert_drought(hours_since_trade: float, cycles_since_trade: int) -> None:
+    """Sent when no trades have been executed for an extended period."""
+    _send(
+        f"<b>TRADE DROUGHT</b>\n"
+        f"No trades in {hours_since_trade:.0f} hours ({cycles_since_trade} cycles).\n"
+        f"Bot is running and rejecting signals correctly.\n"
+        f"Market pool may lack tradeable opportunities right now.\n"
+        f"This is informational — not an error."
+    )
+
+
 def send_test_message() -> None:
     """Send a test message to verify Telegram integration is working."""
     _send("<b>TEST MESSAGE</b>\nPolymarket bot Telegram integration is working.")

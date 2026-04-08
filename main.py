@@ -29,6 +29,7 @@ from monitor import (
     alert_error,
     alert_drawdown_gate,
     alert_heartbeat_missed,
+    alert_drought,
 )
 from backtester import run_backtest, backtest_already_run
 from calibration_tracker import log_forecast, check_and_update_resolutions
@@ -361,8 +362,37 @@ def main() -> None:
         except Exception:
             pass
 
+    # Drought tracking — alert if no trades for 48 hours
+    _drought_hours = 48
+    _drought_alerted = False
+    _cycle_count = 0
+
+    def _get_last_trade_time() -> float:
+        """Get timestamp of most recent trade from trades.jsonl."""
+        try:
+            with open("logs/trades.jsonl") as f:
+                lines = f.readlines()
+            if lines:
+                last = json.loads(lines[-1])
+                from datetime import datetime as _dt
+                return _dt.fromisoformat(last["timestamp"]).timestamp()
+        except Exception:
+            pass
+        return time.time()  # no trades file = assume now
+
+    def _check_drought() -> None:
+        nonlocal _drought_alerted
+        hours = (time.time() - _get_last_trade_time()) / 3600
+        if hours >= _drought_hours and not _drought_alerted:
+            alert_drought(hours, _cycle_count)
+            _drought_alerted = True
+            logger.warning("Trade drought: %d hours, %d cycles without a trade.", int(hours), _cycle_count)
+        elif hours < _drought_hours:
+            _drought_alerted = False  # reset after a trade
+
     _run_trading_cycle()  # Run once immediately on startup
     _write_heartbeat()
+    _cycle_count += 1
 
     next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
@@ -371,10 +401,12 @@ def main() -> None:
             schedule.run_pending()
             time.sleep(30)
             _check_heartbeat()
+            _check_drought()
 
             if time.time() >= next_cycle_time:
                 _run_trading_cycle()
                 _write_heartbeat()
+                _cycle_count += 1
                 next_cycle_time = time.time() + Config.SCAN_INTERVAL_MINUTES * 60
 
         except KeyboardInterrupt:
